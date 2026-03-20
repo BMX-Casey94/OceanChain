@@ -205,12 +205,13 @@ def build_op_return_tx(
         locktime=0,
     )
     
-    # Sign the input
+    # Sign the input (bitcoinx 0.9+: script_code + SigHash, not script= / raw int)
+    sighash_type = SigHash(0x41)  # SIGHASH_ALL | SIGHASH_FORKID (BSV)
     sig_hash = tx.signature_hash(
         input_index=0,
         value=input_value,
-        script=prev_output_script,
-        sighash=0x41,  # SIGHASH_ALL | SIGHASH_FORKID
+        script_code=prev_output_script,
+        sighash=sighash_type,
     )
     
     signature = private_key.sign(sig_hash, hasher=None)
