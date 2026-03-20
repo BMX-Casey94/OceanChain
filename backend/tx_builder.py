@@ -17,6 +17,7 @@ from bitcoinx import (
     Script,
     P2PKH_Address,
     Bitcoin,
+    SigHash,
     pack_byte,
 )
 
@@ -223,7 +224,7 @@ def build_op_return_tx(
     )
     
     # Update input with signed scriptSig
-    tx.inputs[0].script = Script(script_sig)
+    tx.inputs[0].script_sig = Script(script_sig)
     
     # Serialize to hex
     raw_tx_hex = tx.to_bytes().hex()

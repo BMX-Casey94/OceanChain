@@ -358,6 +358,7 @@ class UTXOManager:
             Script,
             P2PKH_Address,
             Bitcoin,
+            SigHash,
             pack_byte,
         )
 
@@ -416,11 +417,12 @@ class UTXOManager:
             prev_output_script = public_key.P2PKH_script()
             pub_key_bytes = public_key.to_bytes()
             for idx, utxo in enumerate(funding_utxos):
+                sighash_type = SigHash(0x41)  # ALL | FORKID (BSV)
                 sig_hash = tx.signature_hash(
                     input_index=idx,
                     value=utxo["value_sat"],
-                    script=prev_output_script,
-                    sighash=0x41,
+                    script_code=prev_output_script,
+                    sighash=sighash_type,
                 )
                 signature = private_key.sign(sig_hash, hasher=None)
                 signature_bytes = signature + pack_byte(0x41)
@@ -428,7 +430,7 @@ class UTXOManager:
                     pack_byte(len(signature_bytes)) + signature_bytes +
                     pack_byte(len(pub_key_bytes)) + pub_key_bytes
                 )
-                tx.inputs[idx].script = Script(script_sig)
+                tx.inputs[idx].script_sig = Script(script_sig)
 
             raw_tx_hex = tx.to_bytes().hex()
             txid = await submit_raw(raw_tx_hex)
