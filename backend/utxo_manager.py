@@ -7,7 +7,7 @@ Handles acquisition, release, consumption, and automatic fan-out refills.
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import asyncpg
 import httpx
@@ -262,49 +262,78 @@ class UTXOManager:
 
         return results
 
-    async def _select_wallet_funding_utxo(self, min_value_sat: int) -> Optional[dict[str, Any]]:
+    async def _collect_wallet_utxo_candidates(self) -> list[dict[str, Any]]:
         """
-        Select the largest wallet UTXO that is not already tracked in Postgres.
-
-        Confirmed UTXOs are preferred. If none are large enough, the broader
-        combined endpoint is used as a fallback for recovery scenarios.
+        All spendable wallet UTXOs from WhatsOnChain (deduped), excluding rows
+        already tracked in the Postgres pool. Confirmed entries are ingested
+        before mempool so behaviour stays predictable when both endpoints overlap.
         """
         known_utxos = await self._known_utxo_keys()
+        seen: set[tuple[str, int]] = set()
+        collected: list[dict[str, Any]] = []
 
         for endpoint in ("confirmed/unspent", "unspent/all"):
-            candidates: list[dict[str, Any]] = []
             for item in await self._fetch_wallet_utxos(endpoint):
                 txid = str(item.get("tx_hash", ""))
                 vout = int(item.get("tx_pos", -1))
+                key = (txid, vout)
+                if key in seen:
+                    continue
                 value_sat = int(item.get("value", 0))
-
                 if not txid or vout < 0:
                     continue
                 if item.get("isSpentInMempoolTx"):
                     continue
-                if (txid, vout) in known_utxos:
-                    continue
-                if value_sat < min_value_sat:
+                if key in known_utxos:
                     continue
 
-                candidates.append({
+                seen.add(key)
+                collected.append({
                     "txid": txid,
                     "vout": vout,
                     "value_sat": value_sat,
                     "status": str(item.get("status", "unknown")),
                 })
 
-            if candidates:
-                candidates.sort(key=lambda item: item["value_sat"], reverse=True)
-                chosen = candidates[0]
-                logger.info(
-                    "Selected wallet funding UTXO %s:%s (%s sat, %s)",
-                    chosen["txid"],
-                    chosen["vout"],
-                    chosen["value_sat"],
-                    chosen["status"],
-                )
-                return chosen
+        collected.sort(key=lambda row: row["value_sat"], reverse=True)
+        return collected
+
+    def _pick_fanout_funding_inputs(
+        self,
+        candidates: list[dict[str, Any]],
+        total_pool_output_sat: int,
+    ) -> Optional[Tuple[list[dict[str, Any]], int, int, bool]]:
+        """
+        Greedily pick one or more wallet UTXOs until pool outputs + fee are covered.
+
+        Returns:
+            (selected_utxos, fee_sat, change_sat, add_change_output) or None.
+        """
+        from tx_builder import calculate_fee
+
+        def est_vbytes(n_in: int, n_outputs: int) -> int:
+            # Rough signed size: header + P2PKH inputs + P2PKH outputs
+            return 10 + n_in * 148 + n_outputs * 34
+
+        if not candidates:
+            return None
+
+        selected: list[dict[str, Any]] = []
+        for utxo in candidates:
+            selected.append(utxo)
+            n_in = len(selected)
+            sum_in = sum(u["value_sat"] for u in selected)
+
+            # Prefer an explicit change output when above dust/min threshold
+            fee_with_change = calculate_fee(est_vbytes(n_in, UTXO_POOL_TARGET + 1))
+            change_w = sum_in - total_pool_output_sat - fee_with_change
+            if change_w >= MIN_CHANGE_OUTPUT_SAT:
+                return selected, fee_with_change, change_w, True
+
+            fee_no_change = calculate_fee(est_vbytes(n_in, UTXO_POOL_TARGET))
+            if sum_in >= total_pool_output_sat + fee_no_change:
+                change_nc = sum_in - total_pool_output_sat - fee_no_change
+                return selected, fee_no_change, change_nc, False
 
         return None
 
@@ -341,48 +370,65 @@ class UTXOManager:
             p2pkh_script = P2PKH_Address.from_string(address, Bitcoin).to_script()
 
             total_output_value = UTXO_POOL_TARGET * UTXO_VALUE_EACH
-            estimated_size = 148 + (34 * UTXO_POOL_TARGET) + 10
-            fee = calculate_fee(estimated_size)
-            total_needed = total_output_value + fee
 
-            source_utxo = await self._select_wallet_funding_utxo(total_needed)
-            if not source_utxo:
+            candidates = await self._collect_wallet_utxo_candidates()
+            picked = self._pick_fanout_funding_inputs(candidates, total_output_value)
+            if not picked:
+                total_avail = sum(c["value_sat"] for c in candidates)
+                largest = candidates[0]["value_sat"] if candidates else 0
+                min_single = total_output_value + calculate_fee(
+                    10 + 148 + UTXO_POOL_TARGET * 34
+                )
                 logger.error(
-                    "No wallet funding UTXO available for fan-out. "
-                    "Fund the configured wallet with at least %s sat in one UTXO.",
-                    total_needed,
+                    "Cannot fund fan-out: largest single UTXO %s sat; "
+                    "%s spendable wallet UTXO(s) totalling %s sat (outside pool). "
+                    "Pool outputs need %s sat plus fee (~%s sat for one P2PKH input). "
+                    "Consolidate to one larger UTXO or lower UTXO_POOL_TARGET.",
+                    largest,
+                    len(candidates),
+                    total_avail,
+                    total_output_value,
+                    min_single,
                 )
                 return None
 
-            outputs = [TxOutput(UTXO_VALUE_EACH, p2pkh_script) for _ in range(UTXO_POOL_TARGET)]
+            funding_utxos, fee_sat, change_value, add_change_output = picked
+            sum_in = sum(u["value_sat"] for u in funding_utxos)
+            logger.info(
+                "Fan-out funding: %s input(s), %s sat in, fee ~%s sat, change output=%s",
+                len(funding_utxos),
+                sum_in,
+                fee_sat,
+                add_change_output,
+            )
 
-            change_value = source_utxo["value_sat"] - total_needed
-            if change_value >= MIN_CHANGE_OUTPUT_SAT:
-                # Keep the refill change output outside the pool so it can act as
-                # the next large funding UTXO instead of being consumed by the
-                # regular broadcaster as a single oversized input.
+            outputs = [TxOutput(UTXO_VALUE_EACH, p2pkh_script) for _ in range(UTXO_POOL_TARGET)]
+            if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
+                # Keep change outside the numbered pool vouts so it remains a funding UTXO.
                 outputs.append(TxOutput(change_value, p2pkh_script))
 
-            prev_txid = bytes.fromhex(source_utxo["txid"])[::-1]
-            tx_input = TxInput(prev_txid, source_utxo["vout"], Script(), 0xFFFFFFFF)
-            tx = Tx(version=1, inputs=[tx_input], outputs=outputs, locktime=0)
+            tx_inputs = [
+                TxInput(bytes.fromhex(u["txid"])[::-1], u["vout"], Script(), 0xFFFFFFFF)
+                for u in funding_utxos
+            ]
+            tx = Tx(version=1, inputs=tx_inputs, outputs=outputs, locktime=0)
 
             prev_output_script = public_key.P2PKH_script()
-            sig_hash = tx.signature_hash(
-                input_index=0,
-                value=source_utxo["value_sat"],
-                script=prev_output_script,
-                sighash=0x41,
-            )
-            signature = private_key.sign(sig_hash, hasher=None)
-            signature_bytes = signature + pack_byte(0x41)
-
             pub_key_bytes = public_key.to_bytes()
-            script_sig = (
-                pack_byte(len(signature_bytes)) + signature_bytes +
-                pack_byte(len(pub_key_bytes)) + pub_key_bytes
-            )
-            tx.inputs[0].script = Script(script_sig)
+            for idx, utxo in enumerate(funding_utxos):
+                sig_hash = tx.signature_hash(
+                    input_index=idx,
+                    value=utxo["value_sat"],
+                    script=prev_output_script,
+                    sighash=0x41,
+                )
+                signature = private_key.sign(sig_hash, hasher=None)
+                signature_bytes = signature + pack_byte(0x41)
+                script_sig = (
+                    pack_byte(len(signature_bytes)) + signature_bytes +
+                    pack_byte(len(pub_key_bytes)) + pub_key_bytes
+                )
+                tx.inputs[idx].script = Script(script_sig)
 
             raw_tx_hex = tx.to_bytes().hex()
             txid = await submit_raw(raw_tx_hex)
@@ -390,7 +436,7 @@ class UTXOManager:
             for vout in range(UTXO_POOL_TARGET):
                 await self.add_utxo(txid, vout, UTXO_VALUE_EACH)
 
-            if change_value >= MIN_CHANGE_OUTPUT_SAT:
+            if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
                 logger.info(
                     "Fan-out preserved %s sat as an external wallet funding UTXO",
                     change_value,
