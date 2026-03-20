@@ -16,9 +16,17 @@ from config import (
     TAAL_API_KEY,
     GORILLA_ARC_URL,
     TAAL_ARC_URL,
+    VERBOSE_ARC_LOGS,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _arc_detail(msg: str, *args: Any) -> None:
+    if VERBOSE_ARC_LOGS:
+        logger.info(msg, *args)
+    else:
+        logger.debug(msg, *args)
 
 
 class BroadcastError(Exception):
@@ -62,28 +70,38 @@ async def _submit_to_arc(
     )
     
     latency_ms = (time.monotonic() - start_time) * 1000
-    
-    logger.info(
-        f"ARC submission to {broadcaster_name}: "
-        f"status={response.status_code}, latency={latency_ms:.1f}ms"
+
+    _arc_detail(
+        "ARC submission to %s: status=%s latency=%.1fms",
+        broadcaster_name,
+        response.status_code,
+        latency_ms,
     )
 
     if response.status_code >= 400:
         snippet = (response.text or "")[:2048]
-        logger.warning(
-            "ARC error body from %s (status %s): %s",
-            broadcaster_name,
-            response.status_code,
-            snippet or "<empty>",
-        )
+        if VERBOSE_ARC_LOGS:
+            logger.warning(
+                "ARC error body from %s (status %s): %s",
+                broadcaster_name,
+                response.status_code,
+                snippet or "<empty>",
+            )
+        else:
+            logger.debug(
+                "ARC error body from %s (status %s): %s",
+                broadcaster_name,
+                response.status_code,
+                snippet or "<empty>",
+            )
 
     response.raise_for_status()
-    
+
     data = response.json()
     txid = data.get("txid") or data.get("txId") or data.get("hash")
     status = data.get("status") or data.get("returnResult") or "unknown"
-    
-    logger.info(f"Broadcast success via {broadcaster_name}: txid={txid}")
+
+    _arc_detail("Broadcast success via %s: txid=%s", broadcaster_name, txid)
     
     return {
         "txid": txid,
@@ -119,7 +137,7 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
             )
         except Exception as e:
             gorilla_error = str(e)
-            logger.warning(f"GorillaPool attempt 1 failed: {e}")
+            _arc_detail("GorillaPool attempt 1 failed: %s", e)
         
         # Wait before retry
         await asyncio.sleep(2.0)
@@ -131,7 +149,7 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
             )
         except Exception as e:
             gorilla_error = str(e)
-            logger.warning(f"GorillaPool attempt 2 failed: {e}")
+            _arc_detail("GorillaPool attempt 2 failed: %s", e)
         
         # Attempt 3: TAAL fallback when configured
         if TAAL_API_KEY:
@@ -141,7 +159,7 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
                 )
             except Exception as e:
                 taal_error = str(e)
-                logger.error(f"TAAL fallback failed: {e}")
+                _arc_detail("TAAL fallback failed: %s", e)
     
     # All attempts failed
     raise BroadcastError(

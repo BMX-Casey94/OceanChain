@@ -21,6 +21,7 @@ from config import (
     BATCH_INTERVAL_SECONDS,
     VPS_API_PORT,
     UTXO_AUTO_REFILL_ON_START,
+    LOG_SUMMARY_INTERVAL_SECONDS,
     validate_config,
     get_config_summary,
 )
@@ -28,6 +29,8 @@ from ais_client import ais_client
 from tx_builder import build_op_return_tx, get_change_address, calculate_fee
 from utxo_manager import utxo_manager
 from broadcaster import submit, BroadcastError
+from broadcast_stats import broadcast_stats
+from logging_config import configure_quiet_loggers, vessel_log_label
 from api_server import (
     run_api_server,
     state as app_state,
@@ -42,6 +45,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+configure_quiet_loggers()
 logger = logging.getLogger(__name__)
 
 # Global database pool
@@ -66,13 +70,16 @@ async def process_vessel(
     Returns:
         True if successful, False otherwise
     """
+    label = vessel_log_label(position)
+
     async with semaphore:
         # Acquire UTXO
         utxo = await utxo_manager.acquire_utxo()
         if not utxo:
-            logger.debug("No UTXO available for vessel %s", mmsi)
+            await broadcast_stats.record_skip_no_utxo(label)
+            logger.debug("No UTXO available for vessel %s", label)
             return False
-        
+
         try:
             # Build transaction
             raw_tx_hex, change_value = build_op_return_tx(
@@ -97,10 +104,14 @@ async def process_vessel(
             record_tx(fee_sat)
             
             # Broadcast WebSocket event
-            await broadcast_tx_event({
+            tx_payload: dict[str, Any] = {
                 "txid": txid,
                 "mmsi": mmsi,
-                "vessel_name": position.get("ship_name", "Unknown"),
+                "vessel_name": position.get("ship_name") or "",
+                "call_sign": position.get("call_sign") or "",
+                "destination": position.get("destination") or "",
+                "imo": position.get("imo") or "",
+                "ship_type": position.get("ship_type"),
                 "lat": position.get("latitude", 0),
                 "lon": position.get("longitude", 0),
                 "speed": position.get("speed", 0),
@@ -108,18 +119,23 @@ async def process_vessel(
                 "timestamp": position.get("timestamp", 0),
                 "fee_sat": fee_sat,
                 "broadcaster": broadcaster,
-            })
-            
-            logger.debug(f"TX {txid} for vessel {mmsi} via {broadcaster}")
+            }
+            await broadcast_tx_event(tx_payload)
+
+            sample = f"{label} tx={txid[:14]}... fee={fee_sat}"
+            await broadcast_stats.record_ok(sample, fee_sat)
+            logger.debug("TX %s for %s via %s", txid[:16], label, broadcaster)
             return True
-        
+
         except BroadcastError as e:
-            logger.error(f"Broadcast failed for {mmsi}: {e}")
+            await broadcast_stats.record_fail_broadcast(label, str(e))
+            logger.debug("Broadcast failed for %s: %s", label, e)
             await utxo_manager.release_utxo(utxo["txid"], utxo["vout"])
             return False
-        
+
         except Exception as e:
-            logger.error(f"Error processing {mmsi}: {e}", exc_info=True)
+            await broadcast_stats.record_fail_other(label, str(e))
+            logger.error("Error processing %s: %s", label, e, exc_info=True)
             await utxo_manager.release_utxo(utxo["txid"], utxo["vout"])
             return False
 
@@ -155,9 +171,9 @@ async def broadcasting_loop() -> None:
             vessel_count = len(snapshot)
             
             if vessel_count == 0:
-                logger.info("No vessels in snapshot, skipping batch")
+                logger.debug("No vessels in snapshot, skipping batch")
                 continue
-            
+
             pool_ready = await utxo_manager.pool_depth()
             if pool_ready == 0:
                 logger.warning(
@@ -169,7 +185,11 @@ async def broadcasting_loop() -> None:
                 )
                 continue
 
-            logger.info(f"Starting batch: {vessel_count} vessels (spendable pool depth: {pool_ready})")
+            logger.debug(
+                "Starting batch: %s vessels (pool depth %s)",
+                vessel_count,
+                pool_ready,
+            )
             update_vessel_count(vessel_count)
             
             # Process vessels concurrently with semaphore
@@ -181,14 +201,21 @@ async def broadcasting_loop() -> None:
             ]
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Count successes
+
             successes = sum(1 for r in results if r is True)
             failures = vessel_count - successes
-            
-            logger.info(
-                f"Batch complete: {successes}/{vessel_count} successful, "
-                f"{failures} failures"
+            task_errors = [r for r in results if isinstance(r, BaseException)]
+            for err in task_errors:
+                if isinstance(err, asyncio.CancelledError):
+                    raise err
+                await broadcast_stats.record_fail_other("task", repr(err))
+                logger.error("Batch task exception: %s", err, exc_info=err)
+
+            logger.debug(
+                "Batch complete: %s/%s ok, %s failed",
+                successes,
+                vessel_count,
+                failures,
             )
         
         except asyncio.CancelledError:
@@ -198,6 +225,49 @@ async def broadcasting_loop() -> None:
         except Exception as e:
             logger.error(f"Error in broadcasting loop: {e}", exc_info=True)
             await asyncio.sleep(10)  # Brief pause before retry
+
+
+async def log_summary_loop() -> None:
+    """
+    Periodic INFO summary: broadcast totals, pool depth, AIS snapshot size, small samples.
+    """
+    while True:
+        try:
+            await asyncio.sleep(LOG_SUMMARY_INTERVAL_SECONDS)
+            snap = await broadcast_stats.drain_window()
+            pool = await utxo_manager.pool_depth()
+            vessels = ais_client.get_vessel_count()
+            msgs = ais_client.get_message_count()
+            total_fail = (
+                snap["fail_broadcast"] + snap["skip_no_utxo"] + snap["fail_other"]
+            )
+            avg_fee = (
+                snap["fees_sat"] / snap["ok"] if snap["ok"] else 0.0
+            )
+            logger.info(
+                "Summary (%ss): broadcasts ok=%s fail=%s "
+                "(arc=%s no_utxo=%s other=%s) avg_fee_sat=%.2f "
+                "pool_depth=%s ais_vessels=%s ais_msgs_total=%s",
+                LOG_SUMMARY_INTERVAL_SECONDS,
+                snap["ok"],
+                total_fail,
+                snap["fail_broadcast"],
+                snap["skip_no_utxo"],
+                snap["fail_other"],
+                avg_fee,
+                pool,
+                vessels,
+                msgs,
+            )
+            if snap["ok_samples"]:
+                logger.info("Sample ok: %s", " · ".join(snap["ok_samples"]))
+            if snap["fail_samples"]:
+                logger.warning("Sample fail: %s", " · ".join(snap["fail_samples"]))
+        except asyncio.CancelledError:
+            logger.info("Summary loop shutdown")
+            raise
+        except Exception as e:
+            logger.error("Summary loop error: %s", e, exc_info=True)
 
 
 async def init_database() -> asyncpg.Pool:
@@ -293,6 +363,12 @@ async def main() -> None:
         asyncio.create_task(utxo_manager.monitor_loop(), name="utxo_monitor"),
         asyncio.create_task(run_api_server(), name="api_server"),
     ]
+    if LOG_SUMMARY_INTERVAL_SECONDS > 0:
+        tasks.append(asyncio.create_task(log_summary_loop(), name="log_summary"))
+    else:
+        logger.info(
+            "Periodic log summary disabled (LOG_SUMMARY_INTERVAL_SECONDS=0)"
+        )
     
     # Setup signal handlers
     loop = asyncio.get_running_loop()

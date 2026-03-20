@@ -19,6 +19,20 @@ from config import AISSTREAM_API_KEY, AISSTREAM_WS_URL
 logger = logging.getLogger(__name__)
 
 
+def _meta_str(meta: dict[str, Any], *keys: str, max_len: int = 0) -> str:
+    for k in keys:
+        v = meta.get(k)
+        if v is None or v == "":
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        if max_len and len(s) > max_len:
+            return s[: max_len - 1] + "…"
+        return s
+    return ""
+
+
 class AISClient:
     """
     Persistent WebSocket client for AISstream.io.
@@ -97,9 +111,27 @@ class AISClient:
             else:
                 heading = int(heading_raw)
             
+            ship_name = _meta_str(metadata, "ShipName", "shipName", max_len=48)
+            call_sign = _meta_str(metadata, "CallSign", "Callsign", "callSign", max_len=12)
+            destination = _meta_str(
+                metadata, "Destination", "destination", max_len=42
+            )
+            imo = _meta_str(metadata, "ImoNumber", "IMO", "imo", max_len=12)
+            ship_type_raw = metadata.get("ShipType") or metadata.get("shipType")
+            ship_type: Optional[int] = None
+            if ship_type_raw is not None:
+                try:
+                    ship_type = int(ship_type_raw)
+                except (TypeError, ValueError):
+                    ship_type = None
+
             return {
                 "mmsi": mmsi,
-                "ship_name": str(metadata.get("ShipName", "")).strip(),
+                "ship_name": ship_name,
+                "call_sign": call_sign,
+                "destination": destination,
+                "imo": imo,
+                "ship_type": ship_type,
                 "latitude": float(position_report.get("Latitude", 0.0)),
                 "longitude": float(position_report.get("Longitude", 0.0)),
                 "speed": float(position_report.get("SpeedOverGround", 0.0)),
@@ -134,10 +166,11 @@ class AISClient:
                 self._last_message_time = datetime.utcnow()
                 
                 # Log periodically
-                if self._message_count % 10000 == 0:
-                    logger.info(
-                        f"Processed {self._message_count} messages, "
-                        f"{len(self._snapshot)} vessels in snapshot"
+                if self._message_count % 50000 == 0:
+                    logger.debug(
+                        "AIS processed %s messages, %s vessels in snapshot",
+                        self._message_count,
+                        len(self._snapshot),
                     )
         
         except json.JSONDecodeError as e:

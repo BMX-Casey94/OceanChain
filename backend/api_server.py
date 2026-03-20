@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from config import VPS_API_PORT
+from config import VPS_API_PORT, UVICORN_ACCESS_LOG
 from utxo_manager import utxo_manager
 
 logger = logging.getLogger(__name__)
@@ -229,7 +229,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     state.ws_connections.add(websocket)
     
-    logger.info(f"WebSocket client connected ({len(state.ws_connections)} total)")
+    logger.debug(
+        "WebSocket client connected (%s total)", len(state.ws_connections)
+    )
     
     try:
         # Send initial stats
@@ -251,7 +253,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "ping"})
     
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
+        logger.debug("WebSocket client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
@@ -384,6 +386,7 @@ async def run_api_server() -> None:
         host="0.0.0.0",
         port=VPS_API_PORT,
         log_level="info",
+        access_log=UVICORN_ACCESS_LOG,
     )
     server = uvicorn.Server(config)
     logger.info("API and WebSocket server listening on port %s", VPS_API_PORT)

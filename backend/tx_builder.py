@@ -111,7 +111,7 @@ def _encode_position_json(position: dict[str, Any]) -> bytes:
         h = int(heading) & 0xFFFF
         heading_out = None if h == 0xFFFF else h
 
-    obj = {
+    obj: dict[str, Any] = {
         "mmsi": int(position.get("mmsi", 0)) & 0xFFFFFFFF,
         "latitude": round(float(position.get("latitude", 0.0)), 6),
         "longitude": round(float(position.get("longitude", 0.0)), 6),
@@ -119,6 +119,25 @@ def _encode_position_json(position: dict[str, Any]) -> bytes:
         "heading": heading_out,
         "timestamp": int(position.get("timestamp", 0)) & 0xFFFFFFFF,
     }
+    # Optional AIS metadata (truncated for on-chain size / fees)
+    sn = (position.get("ship_name") or "").strip()
+    if sn:
+        obj["ship"] = sn[:40]
+    cs = (position.get("call_sign") or "").strip()
+    if cs:
+        obj["call"] = cs[:12]
+    dest = (position.get("destination") or "").strip()
+    if dest:
+        obj["dest"] = dest[:40]
+    imo = (position.get("imo") or "").strip()
+    if imo:
+        obj["imo"] = imo[:12]
+    st = position.get("ship_type")
+    if st is not None:
+        try:
+            obj["type"] = int(st)
+        except (TypeError, ValueError):
+            pass
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
@@ -327,7 +346,7 @@ def decode_op_return_payload(payload: bytes) -> dict[str, Any]:
             heading_out = int(hdg) & 0xFFFF
             if heading_out == 0xFFFF:
                 heading_out = None
-        return {
+        out: dict[str, Any] = {
             "mmsi": str(int(mmsi) & 0xFFFFFFFF),
             "latitude": lat,
             "longitude": lon,
@@ -335,5 +354,19 @@ def decode_op_return_payload(payload: bytes) -> dict[str, Any]:
             "heading": heading_out,
             "timestamp": ts,
         }
+        if "ship" in data:
+            out["ship_name"] = str(data.get("ship") or "")
+        if "call" in data:
+            out["call_sign"] = str(data.get("call") or "")
+        if "dest" in data:
+            out["destination"] = str(data.get("dest") or "")
+        if "imo" in data:
+            out["imo"] = str(data.get("imo") or "")
+        if "type" in data and data["type"] is not None:
+            try:
+                out["ship_type"] = int(data["type"])
+            except (TypeError, ValueError):
+                pass
+        return out
 
     return decode_position_payload(payload)

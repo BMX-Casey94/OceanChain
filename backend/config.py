@@ -45,6 +45,22 @@ UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").st
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
+# Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
+LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
+# Per-HTTP-request ARC logs at INFO when true; otherwise DEBUG only (summary still INFO).
+VERBOSE_ARC_LOGS: bool = os.getenv("VERBOSE_ARC_LOGS", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# Uvicorn HTTP access log (one line per API request); usually off for VPS noise.
+UVICORN_ACCESS_LOG: bool = os.getenv("UVICORN_ACCESS_LOG", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Server Configuration
 VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
@@ -88,6 +104,11 @@ def validate_config() -> list[str]:
     if OP_RETURN_ENCODING not in {"binary", "json"}:
         errors.append("OP_RETURN_ENCODING must be 'binary' or 'json'")
 
+    if LOG_SUMMARY_INTERVAL_SECONDS < 0:
+        errors.append("LOG_SUMMARY_INTERVAL_SECONDS must be >= 0")
+    elif 0 < LOG_SUMMARY_INTERVAL_SECONDS < 10:
+        errors.append("LOG_SUMMARY_INTERVAL_SECONDS must be 0 or >= 10")
+
     return errors
 
 
@@ -111,4 +132,7 @@ def get_config_summary() -> dict:
         "min_tx_fee_sat": MIN_TX_FEE_SAT,
         "vessel_tx_fee_worst_case_bytes": VESSEL_TX_FEE_WORST_CASE_BYTES,
         "op_return_encoding": OP_RETURN_ENCODING,
+        "log_summary_interval_seconds": LOG_SUMMARY_INTERVAL_SECONDS,
+        "verbose_arc_logs": VERBOSE_ARC_LOGS,
+        "uvicorn_access_log": UVICORN_ACCESS_LOG,
     }
