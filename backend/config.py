@@ -35,6 +35,13 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/
 UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "500"))
 UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "10000"))
 MIN_CHANGE_OUTPUT_SAT: int = int(os.getenv("MIN_CHANGE_OUTPUT_SAT", "1"))
+# If true, run one fan-out from the funded wallet when the pool is empty at startup.
+UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
@@ -84,6 +91,7 @@ def get_config_summary() -> dict:
         "database_url": DATABASE_URL[:30] + "..." if len(DATABASE_URL) > 30 else DATABASE_URL,
         "utxo_pool_target": UTXO_POOL_TARGET,
         "utxo_value_each": UTXO_VALUE_EACH,
+        "utxo_auto_refill_on_start": UTXO_AUTO_REFILL_ON_START,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "vps_api_port": VPS_API_PORT,

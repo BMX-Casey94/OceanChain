@@ -19,6 +19,8 @@ import asyncpg
 from config import (
     DATABASE_URL,
     BATCH_INTERVAL_SECONDS,
+    VPS_API_PORT,
+    UTXO_AUTO_REFILL_ON_START,
     validate_config,
     get_config_summary,
 )
@@ -68,7 +70,7 @@ async def process_vessel(
         # Acquire UTXO
         utxo = await utxo_manager.acquire_utxo()
         if not utxo:
-            logger.warning(f"Pool exhausted, skipping vessel {mmsi}")
+            logger.debug("No UTXO available for vessel %s", mmsi)
             return False
         
         try:
@@ -156,7 +158,18 @@ async def broadcasting_loop() -> None:
                 logger.info("No vessels in snapshot, skipping batch")
                 continue
             
-            logger.info(f"Starting batch: {vessel_count} vessels")
+            pool_ready = await utxo_manager.pool_depth()
+            if pool_ready == 0:
+                logger.warning(
+                    "UTXO pool is empty (%s vessels in AIS snapshot). "
+                    "Fund the wallet and run: curl -s -X POST http://127.0.0.1:%s/utxo/refill "
+                    "Or set UTXO_AUTO_REFILL_ON_START=1 in .env for a one-shot fan-out at startup.",
+                    vessel_count,
+                    VPS_API_PORT,
+                )
+                continue
+
+            logger.info(f"Starting batch: {vessel_count} vessels (spendable pool depth: {pool_ready})")
             update_vessel_count(vessel_count)
             
             # Process vessels concurrently with semaphore
@@ -255,7 +268,24 @@ async def main() -> None:
     # Check initial pool depth
     depth = await utxo_manager.pool_depth()
     logger.info(f"Initial UTXO pool depth: {depth}")
-    
+    if depth == 0:
+        logger.warning(
+            "UTXO pool is empty — no on-chain broadcasts will occur until the pool is filled. "
+            "Typical: curl -s -X POST http://127.0.0.1:%s/utxo/refill (wallet needs one large UTXO).",
+            VPS_API_PORT,
+        )
+        if UTXO_AUTO_REFILL_ON_START:
+            logger.info("UTXO_AUTO_REFILL_ON_START=1: attempting fan-out refill from wallet…")
+            txid = await utxo_manager.fan_out_refill()
+            if txid:
+                depth = await utxo_manager.pool_depth()
+                logger.info("Fan-out tx %s recorded; spendable pool depth now: %s", txid, depth)
+            else:
+                logger.error(
+                    "Automatic fan-out failed (no suitable wallet UTXO or broadcast error). "
+                    "Ensure one confirmed UTXO covers roughly UTXO_POOL_TARGET × UTXO_VALUE_EACH plus fees."
+                )
+
     # Create tasks
     tasks = [
         asyncio.create_task(ais_client.run(), name="ais_client"),
