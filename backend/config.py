@@ -45,6 +45,9 @@ UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").st
     "yes",
     "on",
 )
+# After a failed automatic fan-out, skip retry for this many seconds (reduces log spam when
+# wallet cannot yet afford UTXO_POOL_TARGET × UTXO_VALUE_EACH). Set 0 to retry every monitor tick.
+REFILL_FAILURE_COOLDOWN_SECONDS: int = int(os.getenv("REFILL_FAILURE_COOLDOWN_SECONDS", "900"))
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
@@ -120,6 +123,9 @@ def validate_config() -> list[str]:
             "use 2000–5000+ for JSON OP_RETURN / headroom)"
         )
 
+    if REFILL_FAILURE_COOLDOWN_SECONDS < 0:
+        errors.append("REFILL_FAILURE_COOLDOWN_SECONDS must be >= 0")
+
     return errors
 
 
@@ -136,6 +142,7 @@ def get_config_summary() -> dict:
         "utxo_pool_target": UTXO_POOL_TARGET,
         "utxo_value_each": UTXO_VALUE_EACH,
         "utxo_auto_refill_on_start": UTXO_AUTO_REFILL_ON_START,
+        "refill_failure_cooldown_seconds": REFILL_FAILURE_COOLDOWN_SECONDS,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "vps_api_port": VPS_API_PORT,

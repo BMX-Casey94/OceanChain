@@ -7,6 +7,7 @@ Handles acquisition, release, consumption, and automatic fan-out refills.
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional, Tuple
 
 import asyncpg
@@ -19,6 +20,7 @@ from config import (
     BSV_NETWORK,
     WHATSONCHAIN_BASE_URL,
     MIN_CHANGE_OUTPUT_SAT,
+    REFILL_FAILURE_COOLDOWN_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ class UTXOManager:
         self._pool: Optional[asyncpg.Pool] = None
         self._initialized: bool = False
         self._refill_lock = asyncio.Lock()
+        # time.monotonic() deadline; skip automatic fan-out retries until then after a failure
+        self._refill_cooldown_until: float = 0.0
 
     async def initialize(self, pool: asyncpg.Pool) -> None:
         """
@@ -377,19 +381,30 @@ class UTXOManager:
             if not picked:
                 total_avail = sum(c["value_sat"] for c in candidates)
                 largest = candidates[0]["value_sat"] if candidates else 0
-                min_single = total_output_value + calculate_fee(
-                    10 + 148 + UTXO_POOL_TARGET * 34
+                n_c = len(candidates)
+
+                def _est_vbytes(n_in: int, n_out: int) -> int:
+                    return 10 + n_in * 148 + n_out * 34
+
+                # If we used every candidate as input, approximate fee + total required
+                fee_if_all_inputs = (
+                    calculate_fee(_est_vbytes(n_c, UTXO_POOL_TARGET + 1))
+                    if n_c > 0
+                    else 0
                 )
+                approx_total_need = total_output_value + fee_if_all_inputs
                 logger.error(
-                    "Cannot fund fan-out: largest single UTXO %s sat; "
-                    "%s spendable wallet UTXO(s) totalling %s sat (outside pool). "
-                    "Pool outputs need %s sat plus fee (~%s sat for one P2PKH input). "
-                    "Consolidate to one larger UTXO or lower UTXO_POOL_TARGET.",
-                    largest,
-                    len(candidates),
-                    total_avail,
+                    "Cannot fund fan-out: need ~%s sat (outputs %s×%s=%s + ~%s fee w/ %s inputs); "
+                    "non-pool wallet total %s sat, largest UTXO %s sat. "
+                    "Add BSV, lower UTXO_POOL_TARGET/UTXO_VALUE_EACH, or consolidate.",
+                    approx_total_need,
+                    UTXO_POOL_TARGET,
+                    UTXO_VALUE_EACH,
                     total_output_value,
-                    min_single,
+                    fee_if_all_inputs,
+                    n_c,
+                    total_avail,
+                    largest,
                 )
                 return None
 
@@ -445,6 +460,7 @@ class UTXOManager:
                 )
 
             logger.info(f"Fan-out complete: {txid} with {UTXO_POOL_TARGET} outputs")
+            self._refill_cooldown_until = 0.0
             return txid
 
     async def monitor_loop(self) -> None:
@@ -480,8 +496,32 @@ class UTXOManager:
                     metrics["spendable_depth"] < depth_threshold
                     or metrics["spendable_balance"] < value_threshold
                 ):
-                    logger.warning("Pool health below threshold, triggering fan-out refill")
-                    await self.fan_out_refill()
+                    now = time.monotonic()
+                    if (
+                        REFILL_FAILURE_COOLDOWN_SECONDS > 0
+                        and now < self._refill_cooldown_until
+                    ):
+                        logger.debug(
+                            "Pool below threshold; fan-out cooldown %ss remaining — skipping refill",
+                            int(self._refill_cooldown_until - now),
+                        )
+                    else:
+                        logger.warning(
+                            "Pool health below threshold, triggering fan-out refill"
+                        )
+                        result = await self.fan_out_refill()
+                        if (
+                            result is None
+                            and REFILL_FAILURE_COOLDOWN_SECONDS > 0
+                        ):
+                            self._refill_cooldown_until = (
+                                time.monotonic() + REFILL_FAILURE_COOLDOWN_SECONDS
+                            )
+                            logger.warning(
+                                "Fan-out failed; next automatic attempt in %ss "
+                                "(set REFILL_FAILURE_COOLDOWN_SECONDS=0 to disable backoff)",
+                                REFILL_FAILURE_COOLDOWN_SECONDS,
+                            )
 
             except asyncio.CancelledError:
                 logger.info("UTXO monitor loop shutdown")
