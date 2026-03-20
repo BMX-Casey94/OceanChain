@@ -5,9 +5,10 @@ Constructs BSV OP_RETURN transactions containing encoded vessel position data.
 Uses the bitcoinx library for transaction construction and signing.
 """
 
-import struct
+import json
 import math
-from typing import Any
+import struct
+from typing import Any, Optional
 
 from bitcoinx import (
     PrivateKey,
@@ -24,6 +25,7 @@ from bitcoinx import (
 from config import (
     BSV_PRIVATE_KEY_WIF,
     OP_RETURN_PREFIX,
+    OP_RETURN_ENCODING,
     FEE_RATE_SAT_PER_KB,
     ESTIMATED_TX_SIZE,
     MIN_CHANGE_OUTPUT_SAT,
@@ -96,6 +98,37 @@ def _encode_position_payload(position: dict[str, Any]) -> bytes:
     return payload
 
 
+def _encode_position_json(position: dict[str, Any]) -> bytes:
+    """
+    UTF-8 minified JSON for the second OP_RETURN push (human-readable in block explorers).
+
+    Same logical fields as the 20-byte binary format; larger on-chain footprint and fee.
+    """
+    heading = position.get("heading")
+    if heading is None or heading == 511:
+        heading_out: Optional[int] = None
+    else:
+        h = int(heading) & 0xFFFF
+        heading_out = None if h == 0xFFFF else h
+
+    obj = {
+        "mmsi": int(position.get("mmsi", 0)) & 0xFFFFFFFF,
+        "latitude": round(float(position.get("latitude", 0.0)), 6),
+        "longitude": round(float(position.get("longitude", 0.0)), 6),
+        "speed": round(float(position.get("speed", 0.0)), 2),
+        "heading": heading_out,
+        "timestamp": int(position.get("timestamp", 0)) & 0xFFFFFFFF,
+    }
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def encode_position_for_op_return(position: dict[str, Any]) -> bytes:
+    """Second push bytes: either 20-byte binary or JSON, per OP_RETURN_ENCODING."""
+    if OP_RETURN_ENCODING == "json":
+        return _encode_position_json(position)
+    return _encode_position_payload(position)
+
+
 def _build_op_return_script(payload: bytes) -> Script:
     """
     Build an OP_RETURN script with the OceanChain prefix and payload.
@@ -104,7 +137,7 @@ def _build_op_return_script(payload: bytes) -> Script:
         OP_FALSE OP_RETURN <push OCEANCHAIN prefix> <push 20-byte payload>
     
     Args:
-        payload: 20-byte encoded position payload
+        payload: Encoded position (20-byte binary or UTF-8 JSON), second data push
         
     Returns:
         Script object
@@ -179,7 +212,7 @@ def build_op_return_tx(
     # If the estimate was below the true size, we were under-paying; this fixes that without
     # raising your configured sat/kB rate.
     fee = calculate_fee(ESTIMATED_TX_SIZE)
-    payload = _encode_position_payload(position)
+    payload = encode_position_for_op_return(position)
     op_return_script = _build_op_return_script(payload)
     change_addr = P2PKH_Address.from_string(change_address, Bitcoin)
     change_script = change_addr.to_script()
@@ -249,21 +282,15 @@ def get_change_address() -> str:
 def decode_position_payload(payload: bytes) -> dict[str, Any]:
     """
     Decode a 20-byte position payload back to readable values.
-    Useful for verification and debugging.
-    
-    Args:
-        payload: 20-byte encoded payload
-        
-    Returns:
-        Dict with decoded position data
+    For JSON on-chain payloads, use decode_op_return_payload instead.
     """
     if len(payload) != 20:
         raise ValueError(f"Expected 20 bytes, got {len(payload)}")
-    
+
     mmsi, lat_enc, lon_enc, speed_enc, heading_enc, timestamp = struct.unpack(
         ">IiiHHI", payload
     )
-    
+
     return {
         "mmsi": str(mmsi),
         "latitude": lat_enc / 600000.0,
@@ -272,3 +299,41 @@ def decode_position_payload(payload: bytes) -> dict[str, Any]:
         "heading": None if heading_enc == 0xFFFF else heading_enc,
         "timestamp": timestamp,
     }
+
+
+def decode_op_return_payload(payload: bytes) -> dict[str, Any]:
+    """
+    Decode the second OP_RETURN data push (binary or JSON) to the same shape as decode_position_payload.
+    """
+    if len(payload) == 0:
+        raise ValueError("Empty OP_RETURN payload")
+
+    if payload[:1] == b"{":
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError(f"Invalid JSON in OP_RETURN payload: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("OP_RETURN JSON must be an object")
+        mmsi = data.get("mmsi", 0)
+        ts = int(data.get("timestamp", 0)) & 0xFFFFFFFF
+        lat = float(data.get("latitude", 0.0))
+        lon = float(data.get("longitude", 0.0))
+        spd = float(data.get("speed", 0.0))
+        hdg = data.get("heading")
+        if hdg is None:
+            heading_out = None
+        else:
+            heading_out = int(hdg) & 0xFFFF
+            if heading_out == 0xFFFF:
+                heading_out = None
+        return {
+            "mmsi": str(int(mmsi) & 0xFFFFFFFF),
+            "latitude": lat,
+            "longitude": lon,
+            "speed": spd,
+            "heading": heading_out,
+            "timestamp": ts,
+        }
+
+    return decode_position_payload(payload)

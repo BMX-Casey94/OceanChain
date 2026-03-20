@@ -235,7 +235,8 @@ OP_RETURN <OCEANCHAIN>
 [bytes 14–15]  Heading      uint16  degrees (0xFFFF = N/A)
 [bytes 16–19]  Timestamp    uint32  unix seconds
 ─────────────────────────────────────────────────────
-Total: 20 bytes payload
+Total: 20 bytes payload (binary mode), or UTF-8 JSON if `OP_RETURN_ENCODING=json` in `backend/.env`.
+The hex you see after `OCEANCHAIN` in explorers is **not broken**: it is MMSI, lat/lon (×600000), speed (×10), heading, and Unix time packed for minimal size. Decode with `tx_builder.decode_op_return_payload` or set `OP_RETURN_ENCODING=json` for human-readable second push (larger transaction / slightly higher fee).
 Fee:   ceil(serialized_tx_bytes / 1000 × `FEE_RATE_SAT_PER_KB`); default rate 102.5 sat/KB. The builder measures the signed tx and converges so fees match the real size (not a lowball estimate).
 Cost:  Depends on BSV spot price and tx size; if an endpoint still returns HTTP 465, its minimum policy may exceed your chosen rate.
 ```

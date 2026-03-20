@@ -51,6 +51,8 @@ VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
 
 # Transaction Constants
 OP_RETURN_PREFIX: bytes = b"OCEANCHAIN"
+# Second push after prefix: compact 20-byte binary (default), or UTF-8 minified JSON for human-readable explorers.
+OP_RETURN_ENCODING: str = os.getenv("OP_RETURN_ENCODING", "binary").strip().lower()
 # Fee rate: satoshis per 1000 bytes of the *serialized* transaction (standard BSV quoting).
 FEE_RATE_SAT_PER_KB: float = float(os.getenv("FEE_RATE_SAT_PER_KB", "102.5"))
 # Optional floor (satoshis per tx) applied after the sat/kB calculation. Default 1 keeps the
@@ -82,7 +84,10 @@ def validate_config() -> list[str]:
     
     if BSV_NETWORK not in {"main", "test"}:
         errors.append("BSV_NETWORK must be 'main' or 'test'")
-    
+
+    if OP_RETURN_ENCODING not in {"binary", "json"}:
+        errors.append("OP_RETURN_ENCODING must be 'binary' or 'json'")
+
     return errors
 
 
@@ -105,4 +110,5 @@ def get_config_summary() -> dict:
         "fee_rate_sat_per_kb": FEE_RATE_SAT_PER_KB,
         "min_tx_fee_sat": MIN_TX_FEE_SAT,
         "vessel_tx_fee_worst_case_bytes": VESSEL_TX_FEE_WORST_CASE_BYTES,
+        "op_return_encoding": OP_RETURN_ENCODING,
     }
