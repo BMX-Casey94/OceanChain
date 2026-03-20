@@ -1,0 +1,31 @@
+[Unit]
+Description=OceanChain Maritime Intelligence Broadcasting Engine
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=oceanchain
+Group=oceanchain
+WorkingDirectory=/opt/oceanchain/backend
+EnvironmentFile=/opt/oceanchain/backend/.env
+ExecStart=/usr/bin/python3 /opt/oceanchain/backend/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=oceanchain
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/oceanchain
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

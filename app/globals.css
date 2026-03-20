@@ -1,0 +1,308 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: hsl(220, 30%, 2%);
+  --foreground: hsl(0, 0%, 98%);
+  --card: hsl(220, 25%, 4%);
+  --card-foreground: hsl(0, 0%, 98%);
+  --popover: hsl(220, 25%, 4%);
+  --popover-foreground: hsl(0, 0%, 98%);
+  --primary: hsl(180, 100%, 50%);
+  --primary-foreground: hsl(220, 30%, 5%);
+  --secondary: hsl(220, 20%, 8%);
+  --secondary-foreground: hsl(0, 0%, 98%);
+  --muted: hsl(220, 20%, 8%);
+  --muted-foreground: hsl(220, 10%, 64%);
+  --accent: hsl(180, 100%, 50%);
+  --accent-foreground: hsl(220, 30%, 5%);
+  --destructive: hsl(0, 72%, 51%);
+  --destructive-foreground: hsl(0, 0%, 98%);
+  --border: hsl(220, 20%, 15%);
+  --input: hsl(220, 20%, 15%);
+  --ring: hsl(180, 100%, 50%);
+  --radius: 0.625rem;
+  
+  /* OceanChain custom tokens */
+  --teal-neon: rgba(20, 184, 166, 1);
+  --teal-glow: rgba(20, 184, 166, 0.15);
+  --success: hsl(142, 70%, 45%);
+  --warning: hsl(38, 92%, 50%);
+  --danger: hsl(0, 72%, 51%);
+}
+
+.dark {
+  --background: hsl(220, 30%, 2%);
+  --foreground: hsl(0, 0%, 98%);
+  --card: hsl(220, 25%, 4%);
+  --card-foreground: hsl(0, 0%, 98%);
+  --popover: hsl(220, 25%, 4%);
+  --popover-foreground: hsl(0, 0%, 98%);
+  --primary: hsl(180, 100%, 50%);
+  --primary-foreground: hsl(220, 30%, 5%);
+  --secondary: hsl(220, 20%, 8%);
+  --secondary-foreground: hsl(0, 0%, 98%);
+  --muted: hsl(220, 20%, 8%);
+  --muted-foreground: hsl(220, 10%, 64%);
+  --accent: hsl(180, 100%, 50%);
+  --accent-foreground: hsl(220, 30%, 5%);
+  --destructive: hsl(0, 72%, 51%);
+  --destructive-foreground: hsl(0, 0%, 98%);
+  --border: hsl(220, 20%, 15%);
+  --input: hsl(220, 20%, 15%);
+  --ring: hsl(180, 100%, 50%);
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), 'Inter', system-ui, sans-serif;
+  --font-heading: var(--font-bebas-neue), 'Bebas Neue', system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-teal-neon: var(--teal-neon);
+  --color-teal-glow: var(--teal-glow);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  
+  html {
+    color-scheme: dark;
+  }
+  
+  body {
+    @apply text-foreground antialiased;
+    background: linear-gradient(135deg, #000d14 0%, #000000 100%);
+    min-height: 100vh;
+  }
+}
+
+/* Glass Card Component - using pure CSS to avoid @apply issues */
+.glass-card {
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(0,7,12,0.97) 0%, rgba(0,0,0,1) 100%);
+  box-shadow: 0 0 0 1px rgba(20,184,166,0.06), 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.glass-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(20,184,166,0.4), transparent);
+}
+
+/* Inner Panel for nested cards */
+.inner-panel {
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255,255,255,0.025);
+}
+
+/* Primary Neon Button */
+.btn-neon {
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: white;
+  transition: all 0.3s ease;
+  background: linear-gradient(135deg, #2dd4bf, #0d9488);
+}
+
+.btn-neon:hover {
+  background: linear-gradient(135deg, #14b8a6, #0f766e);
+  box-shadow: 0 0 20px rgba(20,184,166,0.4);
+  transform: scale(1.02);
+}
+
+.btn-neon:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(20,184,166,0.5);
+}
+
+/* Outline Neon Button */
+.btn-outline-neon {
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  border: 2px solid rgba(20,184,166,0.6);
+  background: rgba(0,0,0,0.8);
+  color: #14b8a6;
+}
+
+.btn-outline-neon:hover {
+  border-color: rgba(20,184,166,1);
+  box-shadow: 0 0 16px rgba(20,184,166,0.3);
+  transform: scale(1.02);
+}
+
+.btn-outline-neon:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(20,184,166,0.5);
+}
+
+/* Neon Input */
+.input-neon {
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  color: white;
+  transition: all 0.3s ease;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.input-neon::placeholder {
+  color: #6b7280;
+}
+
+.input-neon:focus {
+  outline: none;
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 2px rgba(20,184,166,0.2), 0 0 20px rgba(20,184,166,0.1);
+}
+
+/* Card Hover Utility */
+.card-hover {
+  transition: all 0.3s ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 0 0 1px rgba(20,184,166,0.1), 0 8px 32px rgba(0,0,0,0.5), 0 0 30px rgba(20,184,166,0.1);
+}
+
+/* PM Card (alternative card style) */
+.pm-card {
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(0,7,12,0.97) 0%, rgba(0,0,0,1) 100%);
+  box-shadow: 0 0 0 1px rgba(20,184,166,0.06), 0 8px 32px rgba(0,0,0,0.5);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(20,184,166,0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(20,184,166,0.4);
+}
+
+/* Particle Float Animation with reduced motion support */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes particle-float {
+    0% {
+      transform: translateY(0);
+      opacity: 1;
+    }
+    100% {
+      transform: translateY(-100px);
+      opacity: 0;
+    }
+  }
+  
+  .particle {
+    animation: particle-float var(--duration, 10s) linear infinite;
+    animation-delay: var(--delay, 0s);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .particle {
+    animation: none;
+  }
+  
+  .marquee-content {
+    animation-play-state: paused !important;
+  }
+}
+
+/* Marquee Animation */
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.marquee-content {
+  animation: marquee 40s linear infinite;
+}
+
+.marquee-content:hover {
+  animation-play-state: paused;
+}
+
+/* Bounce Animation for scroll indicator */
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.scroll-indicator {
+  animation: bounce 2s ease-in-out infinite;
+}
+
+/* Focus visible for accessibility */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.5);
+}
