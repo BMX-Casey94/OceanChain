@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 env_path = Path(__file__).parent / ".env"
-load_dotenv(dotenv_path=env_path)
+# override=True: values in backend/.env win over stale/empty shell exports (e.g. BSV_NETWORK).
+load_dotenv(dotenv_path=env_path, override=True)
 
 # AISstream Configuration
 AISSTREAM_API_KEY: str = os.getenv("AISSTREAM_API_KEY", "")

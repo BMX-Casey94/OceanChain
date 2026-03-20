@@ -239,7 +239,7 @@ def get_change_address() -> str:
         BSV address string (P2PKH)
     """
     private_key = PrivateKey.from_WIF(BSV_PRIVATE_KEY_WIF)
-    address = private_key.public_key.to_address(coin=Bitcoin)
+    address = private_key.public_key.to_address(network=Bitcoin)
     return address.to_string()
 
 
