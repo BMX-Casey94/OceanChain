@@ -7,7 +7,7 @@ Handles acquisition, release, consumption, and automatic fan-out refills.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import asyncpg
 import httpx
@@ -33,7 +33,7 @@ class UTXOManager:
     """
 
     def __init__(self) -> None:
-        self._pool: asyncpg.Pool | None = None
+        self._pool: Optional[asyncpg.Pool] = None
         self._initialized: bool = False
         self._refill_lock = asyncio.Lock()
 
@@ -68,7 +68,7 @@ class UTXOManager:
         self._initialized = True
         logger.info("UTXO manager initialized")
 
-    async def acquire_utxo(self) -> dict[str, Any] | None:
+    async def acquire_utxo(self) -> Optional[dict[str, Any]]:
         """
         Atomically lock and return one viable UTXO from the pool.
 
@@ -237,7 +237,7 @@ class UTXOManager:
 
         address = get_change_address()
         url = f"{WHATSONCHAIN_BASE_URL}/{BSV_NETWORK}/address/{address}/{endpoint}"
-        token: str | None = None
+        token: Optional[str] = None
         results: list[dict[str, Any]] = []
 
         async with httpx.AsyncClient() as client:
@@ -262,7 +262,7 @@ class UTXOManager:
 
         return results
 
-    async def _select_wallet_funding_utxo(self, min_value_sat: int) -> dict[str, Any] | None:
+    async def _select_wallet_funding_utxo(self, min_value_sat: int) -> Optional[dict[str, Any]]:
         """
         Select the largest wallet UTXO that is not already tracked in Postgres.
 
@@ -308,7 +308,7 @@ class UTXOManager:
 
         return None
 
-    async def fan_out_refill(self) -> str | None:
+    async def fan_out_refill(self) -> Optional[str]:
         """
         Create a fan-out transaction to refill the UTXO pool.
 

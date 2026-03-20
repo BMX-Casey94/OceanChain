@@ -8,7 +8,7 @@ GorillaPool as primary and TAAL as fallback.
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -27,8 +27,8 @@ class BroadcastError(Exception):
     def __init__(
         self,
         message: str,
-        gorilla_error: str | None = None,
-        taal_error: str | None = None,
+        gorilla_error: Optional[str] = None,
+        taal_error: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.gorilla_error = gorilla_error
@@ -40,7 +40,7 @@ async def _submit_to_arc(
     url: str,
     raw_tx_hex: str,
     broadcaster_name: str,
-    api_key: str | None = None,
+    api_key: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Submit a transaction to an ARC endpoint.
@@ -99,8 +99,8 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
     Raises:
         BroadcastError if all attempts fail
     """
-    gorilla_error: str | None = None
-    taal_error: str | None = None
+    gorilla_error: Optional[str] = None
+    taal_error: Optional[str] = None
     
     async with httpx.AsyncClient() as client:
         # Attempt 1: GorillaPool (no API key needed)

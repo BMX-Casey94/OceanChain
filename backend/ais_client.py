@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -33,7 +33,7 @@ class AISClient:
         self._connected: bool = False
         self._reconnect_delay: float = 5.0
         self._message_count: int = 0
-        self._last_message_time: datetime | None = None
+        self._last_message_time: Optional[datetime] = None
     
     def get_current_snapshot(self) -> dict[str, dict[str, Any]]:
         """
@@ -56,7 +56,7 @@ class AISClient:
         """Return whether the client is currently connected."""
         return self._connected
     
-    def _parse_position_report(self, message: dict[str, Any]) -> dict[str, Any] | None:
+    def _parse_position_report(self, message: dict[str, Any]) -> Optional[dict[str, Any]]:
         """
         Parse an AISstream PositionReport message into our internal format.
         

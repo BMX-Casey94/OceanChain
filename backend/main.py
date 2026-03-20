@@ -12,7 +12,7 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import Any
+from typing import Any, Optional
 
 import asyncpg
 
@@ -43,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global database pool
-db_pool: asyncpg.Pool | None = None
+db_pool: Optional[asyncpg.Pool] = None
 
 
 async def process_vessel(
