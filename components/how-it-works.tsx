@@ -13,7 +13,7 @@ const steps = [
     number: "02",
     icon: Binary,
     title: "TX Construction",
-    description: "Each vessel position is encoded into a compact 20-byte payload and embedded in a BSV OP_RETURN output. At 102.5 sat/KB, each transaction costs approximately 22 satoshis — fractions of a penny per permanent record.",
+    description: "Each vessel position is encoded into a compact 20-byte payload and embedded in a BSV OP_RETURN output. The fee is ceil(tx size / 1000 × your sat/KB rate); the builder measures the signed transaction so the fee matches the real payload and scripts, not a rough estimate.",
   },
   {
     number: "03",

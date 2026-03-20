@@ -40,8 +40,8 @@ const payloadSpec = `OP_RETURN <OCEANCHAIN>
 [bytes 16–19]  Timestamp    uint32  unix seconds
 ─────────────────────────────────────────────────────
 Total: 20 bytes payload
-Fee:   ~220 byte TX × 102.5 sat/KB ≈ 22 sat/TX
-Cost:  ~$0.0000032 USD per vessel position`
+Fee:   ceil(serialized bytes / 1000 × FEE_RATE_SAT_PER_KB); default 102.5 sat/KB, converged on actual signed size
+Cost:  Varies with BSV spot and tx size; see backend/.env`
 
 export function Architecture() {
   return (

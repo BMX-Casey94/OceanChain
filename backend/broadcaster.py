@@ -67,7 +67,16 @@ async def _submit_to_arc(
         f"ARC submission to {broadcaster_name}: "
         f"status={response.status_code}, latency={latency_ms:.1f}ms"
     )
-    
+
+    if response.status_code >= 400:
+        snippet = (response.text or "")[:2048]
+        logger.warning(
+            "ARC error body from %s (status %s): %s",
+            broadcaster_name,
+            response.status_code,
+            snippet or "<empty>",
+        )
+
     response.raise_for_status()
     
     data = response.json()

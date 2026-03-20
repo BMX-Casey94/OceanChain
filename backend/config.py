@@ -51,10 +51,17 @@ VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
 
 # Transaction Constants
 OP_RETURN_PREFIX: bytes = b"OCEANCHAIN"
-FEE_RATE_SAT_PER_KB: float = 102.5
+# Fee rate: satoshis per 1000 bytes of the *serialized* transaction (standard BSV quoting).
+FEE_RATE_SAT_PER_KB: float = float(os.getenv("FEE_RATE_SAT_PER_KB", "102.5"))
+# Optional floor (satoshis per tx) applied after the sat/kB calculation. Default 1 keeps the
+# effective rate at your configured FEE_RATE only; raising this increases effective sat/kB on small txs.
+MIN_TX_FEE_SAT: int = int(os.getenv("MIN_TX_FEE_SAT", "1"))
 
-# Estimated transaction size in bytes (for fee calculation)
-ESTIMATED_TX_SIZE: int = 220
+# First guess for vessel OP_RETURN fee iteration (tx_builder measures the signed tx and converges).
+ESTIMATED_TX_SIZE: int = int(os.getenv("ESTIMATED_TX_SIZE", "220"))
+
+# When selecting pool UTXOs, require enough value for fee at this serialized-size ceiling (≥ realistic tx).
+VESSEL_TX_FEE_WORST_CASE_BYTES: int = int(os.getenv("VESSEL_TX_FEE_WORST_CASE_BYTES", "320"))
 
 
 def validate_config() -> list[str]:
@@ -96,4 +103,6 @@ def get_config_summary() -> dict:
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "vps_api_port": VPS_API_PORT,
         "fee_rate_sat_per_kb": FEE_RATE_SAT_PER_KB,
+        "min_tx_fee_sat": MIN_TX_FEE_SAT,
+        "vessel_tx_fee_worst_case_bytes": VESSEL_TX_FEE_WORST_CASE_BYTES,
     }

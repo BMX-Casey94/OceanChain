@@ -27,6 +27,8 @@ from config import (
     FEE_RATE_SAT_PER_KB,
     ESTIMATED_TX_SIZE,
     MIN_CHANGE_OUTPUT_SAT,
+    MIN_TX_FEE_SAT,
+    VESSEL_TX_FEE_WORST_CASE_BYTES,
 )
 
 
@@ -126,18 +128,21 @@ def calculate_fee(tx_size_bytes: int = ESTIMATED_TX_SIZE) -> int:
         tx_size_bytes: Transaction size in bytes
         
     Returns:
-        Fee in satoshis (rounded up)
+        Fee in satoshis (rounded up), at least MIN_TX_FEE_SAT when set above 1
     """
-    fee_sat = (tx_size_bytes / 1000) * FEE_RATE_SAT_PER_KB
-    return math.ceil(fee_sat)
+    fee_sat = math.ceil((tx_size_bytes / 1000.0) * FEE_RATE_SAT_PER_KB)
+    return max(fee_sat, MIN_TX_FEE_SAT)
 
 
 def minimum_viable_utxo_value() -> int:
     """
     Minimum input value required to create a standard tx that still leaves
     a change output above the dust threshold.
+
+    Uses a worst-case serialized size so pool UTXOs are not selected when the
+    real signed tx (larger than a lowball estimate) would need a higher fee.
     """
-    return calculate_fee(ESTIMATED_TX_SIZE) + MIN_CHANGE_OUTPUT_SAT
+    return calculate_fee(VESSEL_TX_FEE_WORST_CASE_BYTES) + MIN_CHANGE_OUTPUT_SAT
 
 
 def build_op_return_tx(
@@ -170,67 +175,63 @@ def build_op_return_tx(
     prev_vout = int(utxo["vout"])
     input_value = int(utxo["value_sat"])
     
-    # Calculate fee
+    # Fee: start from an estimate, then align to the signed serialized size at FEE_RATE_SAT_PER_KB.
+    # If the estimate was below the true size, we were under-paying; this fixes that without
+    # raising your configured sat/kB rate.
     fee = calculate_fee(ESTIMATED_TX_SIZE)
-    
-    # Calculate change value
-    change_value = input_value - fee
-    if change_value < MIN_CHANGE_OUTPUT_SAT:
-        minimum_value = minimum_viable_utxo_value()
-        raise ValueError(
-            f"Insufficient UTXO value: {input_value} sat, "
-            f"minimum viable value is {minimum_value} sat"
-        )
-    
-    # Build OP_RETURN output
     payload = _encode_position_payload(position)
     op_return_script = _build_op_return_script(payload)
-    op_return_output = TxOutput(0, op_return_script)
-    
-    # Build change output
     change_addr = P2PKH_Address.from_string(change_address, Bitcoin)
     change_script = change_addr.to_script()
-    change_output = TxOutput(change_value, change_script)
-    
-    # Build input
-    # Create the scriptSig placeholder (will be signed later)
     prev_output_script = public_key.P2PKH_script()
-    tx_input = TxInput(prev_txid, prev_vout, Script(), 0xFFFFFFFF)
-    
-    # Create transaction
-    tx = Tx(
-        version=1,
-        inputs=[tx_input],
-        outputs=[op_return_output, change_output],
-        locktime=0,
-    )
-    
-    # Sign the input (bitcoinx 0.9+: script_code + SigHash, not script= / raw int)
     sighash_type = SigHash(0x41)  # SIGHASH_ALL | SIGHASH_FORKID (BSV)
-    sig_hash = tx.signature_hash(
-        input_index=0,
-        value=input_value,
-        script_code=prev_output_script,
-        sighash=sighash_type,
+
+    for _ in range(6):
+        change_value = input_value - fee
+        if change_value < MIN_CHANGE_OUTPUT_SAT:
+            minimum_value = minimum_viable_utxo_value()
+            raise ValueError(
+                f"Insufficient UTXO value: {input_value} sat, "
+                f"minimum viable value is {minimum_value} sat"
+            )
+
+        op_return_output = TxOutput(0, op_return_script)
+        change_output = TxOutput(change_value, change_script)
+        tx_input = TxInput(prev_txid, prev_vout, Script(), 0xFFFFFFFF)
+
+        tx = Tx(
+            version=1,
+            inputs=[tx_input],
+            outputs=[op_return_output, change_output],
+            locktime=0,
+        )
+
+        sig_hash = tx.signature_hash(
+            input_index=0,
+            value=input_value,
+            script_code=prev_output_script,
+            sighash=sighash_type,
+        )
+        signature = private_key.sign(sig_hash, hasher=None)
+        signature_bytes = signature + pack_byte(0x41)
+
+        pub_key_bytes = public_key.to_bytes()
+        script_sig = (
+            pack_byte(len(signature_bytes)) + signature_bytes +
+            pack_byte(len(pub_key_bytes)) + pub_key_bytes
+        )
+        tx.inputs[0].script_sig = Script(script_sig)
+
+        actual_bytes = len(tx.to_bytes())
+        required_fee = calculate_fee(actual_bytes)
+        if fee >= required_fee:
+            return (tx.to_bytes().hex(), change_value)
+        fee = required_fee
+
+    raise RuntimeError(
+        "Could not converge on a fee for OP_RETURN tx after several iterations; "
+        "check FEE_RATE_SAT_PER_KB / MIN_TX_FEE_SAT and UTXO_VALUE_EACH."
     )
-    
-    signature = private_key.sign(sig_hash, hasher=None)
-    signature_bytes = signature + pack_byte(0x41)  # Append sighash type
-    
-    # Build scriptSig: <signature> <pubkey>
-    pub_key_bytes = public_key.to_bytes()
-    script_sig = (
-        pack_byte(len(signature_bytes)) + signature_bytes +
-        pack_byte(len(pub_key_bytes)) + pub_key_bytes
-    )
-    
-    # Update input with signed scriptSig
-    tx.inputs[0].script_sig = Script(script_sig)
-    
-    # Serialize to hex
-    raw_tx_hex = tx.to_bytes().hex()
-    
-    return (raw_tx_hex, change_value)
 
 
 def get_change_address() -> str:

@@ -236,8 +236,8 @@ OP_RETURN <OCEANCHAIN>
 [bytes 16–19]  Timestamp    uint32  unix seconds
 ─────────────────────────────────────────────────────
 Total: 20 bytes payload
-Fee:   ~220 byte TX × 102.5 sat/KB ≈ 22 sat/TX
-Cost:  ~$0.000013 USD per vessel position
+Fee:   ceil(serialized_tx_bytes / 1000 × `FEE_RATE_SAT_PER_KB`); default rate 102.5 sat/KB. The builder measures the signed tx and converges so fees match the real size (not a lowball estimate).
+Cost:  Depends on BSV spot price and tx size; if an endpoint still returns HTTP 465, its minimum policy may exceed your chosen rate.
 ```
 
 ---
