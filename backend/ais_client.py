@@ -67,13 +67,18 @@ class AISClient:
             Parsed position dict or None if parsing failed
         """
         try:
-            metadata = message.get("Metadata", {})
+            # Per AISstream docs, PositionReport lives under Message; vessel id is UserID
+            # (see https://aisstream.io/documentation — Python example uses UserID).
+            metadata = message.get("Metadata") or {}
             position_report = message.get("Message", {}).get("PositionReport", {})
             
-            if not metadata or not position_report:
+            if not position_report:
                 return None
             
-            mmsi = str(metadata.get("MMSI", ""))
+            user_id = position_report.get("UserID")
+            mmsi = str(user_id) if user_id is not None else ""
+            if not mmsi:
+                mmsi = str(metadata.get("MMSI", "")).strip()
             if not mmsi:
                 return None
             
