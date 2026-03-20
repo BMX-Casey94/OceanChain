@@ -148,8 +148,8 @@ oceanchain/
    TAAL_API_KEY=your_taal_key
    DATABASE_URL=postgresql://oceanchain:your_secure_password@YOUR_VPS_IP:5432/oceanchain
    BSV_NETWORK=main
-   UTXO_POOL_TARGET=500
-   UTXO_VALUE_EACH=10000
+   UTXO_POOL_TARGET=800
+   UTXO_VALUE_EACH=3000
    BATCH_INTERVAL_SECONDS=10
    MIN_CHANGE_OUTPUT_SAT=1
    VPS_API_PORT=8000
@@ -157,7 +157,7 @@ oceanchain/
 
 4. **Fund the BSV wallet**
    
-   The wallet address derived from `BSV_PRIVATE_KEY_WIF` needs to be funded with BSV for transaction fees. At 22 sat per TX and 300,000 vessels, each batch costs ~6.6M satoshis (~0.066 BSV).
+   The wallet address derived from `BSV_PRIVATE_KEY_WIF` must cover the **fan-out** (roughly `UTXO_POOL_TARGET × UTXO_VALUE_EACH` plus fan-out fees) and ongoing per-vessel fees (see `FEE_RATE_SAT_PER_KB`). Smaller `UTXO_VALUE_EACH` (e.g. 2000–5000 sat) is usually enough for each AIS broadcast; increase if you use large JSON OP_RETURN payloads.
 
 5. **Initialize UTXO pool**
    ```bash

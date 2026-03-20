@@ -32,8 +32,11 @@ WHATSONCHAIN_BASE_URL: str = "https://api.whatsonchain.com/v1/bsv"
 DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/oceanchain")
 
 # UTXO Pool Configuration
-UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "500"))
-UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "10000"))
+# Each vessel tx spends one pool UTXO; fee is only tens–low hundreds of sats at typical sizes/rates.
+# Smaller UTXO_VALUE_EACH + higher UTXO_POOL_TARGET = less capital locked, more rows (fan-out needs
+# one wallet input covering TARGET × VALUE_EACH + fan-out fee).
+UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "800"))
+UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "3000"))
 MIN_CHANGE_OUTPUT_SAT: int = int(os.getenv("MIN_CHANGE_OUTPUT_SAT", "1"))
 # If true, run one fan-out from the funded wallet when the pool is empty at startup.
 UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").strip().lower() in (
@@ -108,6 +111,14 @@ def validate_config() -> list[str]:
         errors.append("LOG_SUMMARY_INTERVAL_SECONDS must be >= 0")
     elif 0 < LOG_SUMMARY_INTERVAL_SECONDS < 10:
         errors.append("LOG_SUMMARY_INTERVAL_SECONDS must be 0 or >= 10")
+
+    if UTXO_POOL_TARGET < 1:
+        errors.append("UTXO_POOL_TARGET must be >= 1")
+    if UTXO_VALUE_EACH < 500:
+        errors.append(
+            "UTXO_VALUE_EACH should be >= 500 sat (needs to cover fee + min change; "
+            "use 2000–5000+ for JSON OP_RETURN / headroom)"
+        )
 
     return errors
 
