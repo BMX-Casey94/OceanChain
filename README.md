@@ -159,7 +159,7 @@ oceanchain/
    
    The wallet address derived from `BSV_PRIVATE_KEY_WIF` must cover the **fan-out** (roughly `UTXO_POOL_TARGET × UTXO_VALUE_EACH` plus fan-out fees) and ongoing per-vessel fees (see `FEE_RATE_SAT_PER_KB`). Smaller `UTXO_VALUE_EACH` (e.g. 2000–5000 sat) is usually enough for each AIS broadcast; increase if you use large JSON OP_RETURN payloads.
 
-   **Internal UTXO tracking:** For wallets with very large transaction counts, third-party indexers may time out. OceanChain therefore does **not** discover funding UTXOs from WhatsOnChain. You must register each large funding output you intend to spend in fan-out as a **`reserve`** row via `POST /utxo/reserve` (after it is confirmed on-chain). The **`pool`** rows are the per-vessel spend outputs maintained by the service.
+   **Internal UTXO tracking:** Vessel spends use only **`pool`** rows. Fan-out consumes **`reserve`** rows you track in Postgres (not live WOC lookups on every spend). For **many** unspents (e.g. thousands), set **`OCEANCHAIN_ADMIN_API_KEY`** and call **`POST /utxo/sync-reserves-woc`** with header **`X-OceanChain-Admin-Key`** once — it imports the current **unspent** list from WhatsOnChain (lighter than full tx history). Alternatively register outputs one-by-one with **`POST /utxo/reserve`**, or **consolidate** by sending yourself one payment to this address so a single `txid`/`vout` is easy to copy from any explorer withdrawal history.
 
 5. **Initialize UTXO pool**
    ```bash
@@ -180,6 +180,15 @@ oceanchain/
    ```
 
    `POST /utxo/refill` spends **unlocked `reserve`** rows from PostgreSQL, builds and broadcasts the fan-out via ARC, then atomically updates the database: spent reserves removed, new **`pool`** outputs inserted, and any change output recorded as **`reserve`** again.
+
+   **Bulk reserve import (busy wallets):** with the service running, after setting **`OCEANCHAIN_ADMIN_API_KEY`** in `.env` and restarting:
+
+   ```bash
+   curl -sS -X POST http://127.0.0.1:8000/utxo/sync-reserves-woc \
+     -H "X-OceanChain-Admin-Key: YOUR_KEY_HERE"
+   ```
+
+   Then **`POST /utxo/refill`** as above. Restrict port **8000** (firewall / localhost + SSH tunnel) so this admin header is not exposed on the public Internet without TLS.
 
 6. **Install systemd service**
    ```bash
@@ -203,6 +212,7 @@ oceanchain/
 | `/engine/pause` | POST | Pause broadcasting loop |
 | `/engine/resume` | POST | Resume broadcasting loop |
 | `/utxo/reserve` | POST | Register a confirmed funding UTXO (`reserve`) for internal fan-out |
+| `/utxo/sync-reserves-woc` | POST | Bulk `reserve` import from WhatsOnChain unspent (requires `OCEANCHAIN_ADMIN_API_KEY` + `X-OceanChain-Admin-Key`) |
 | `/utxo/refill` | POST | Fan-out from internal `reserve` rows into the `pool` |
 | `/ws` | WebSocket | Real-time TX, stats and UTXO pool events on the same `VPS_API_PORT` |
 

@@ -11,13 +11,16 @@ import time
 from typing import Any, Optional, Tuple
 
 import asyncpg
+import httpx
 
 from config import (
     UTXO_POOL_TARGET,
     UTXO_VALUE_EACH,
     BSV_PRIVATE_KEY_WIF,
+    BSV_NETWORK,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
+    WHATSONCHAIN_BASE_URL,
 )
 
 # Vessel broadcasts only spend `pool` rows. Fan-out funding uses `reserve` rows tracked in Postgres
@@ -248,6 +251,119 @@ class UTXOManager:
             vout,
             value_sat,
         )
+
+    async def bulk_register_reserve_utxos(
+        self,
+        rows: list[tuple[str, int, int]],
+    ) -> int:
+        """
+        Upsert many `reserve` rows in one transaction (for indexer bootstrap).
+
+        Each tuple is (txid_hex, vout, value_sat). Invalid txids are skipped.
+        """
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        cleaned: list[tuple[str, int, int]] = []
+        for txid, vout, value_sat in rows:
+            t = txid.strip().lower()
+            if len(t) != 64 or any(c not in "0123456789abcdef" for c in t):
+                continue
+            if vout < 0 or value_sat < 1:
+                continue
+            cleaned.append((t, vout, value_sat))
+
+        if not cleaned:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(
+                    """
+                    INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
+                    VALUES ($1, $2, $3, 'reserve', FALSE)
+                    ON CONFLICT (txid, vout) DO UPDATE SET
+                        value_sat = EXCLUDED.value_sat,
+                        utxo_role = 'reserve',
+                        locked = FALSE
+                    """,
+                    cleaned,
+                )
+
+        logger.info("Bulk registered %s reserve UTXO row(s)", len(cleaned))
+        return len(cleaned)
+
+    async def sync_reserves_from_whatsonchain(
+        self,
+        *,
+        timeout_seconds: float = 300.0,
+        max_utxos: int = 20000,
+    ) -> dict[str, Any]:
+        """
+        Fetch current unspent outputs for this wallet's P2PKH from WhatsOnChain and
+        upsert them as internal `reserve` rows.
+
+        This uses the **address unspent** endpoint (UTXO set), not full transaction
+        history — it often succeeds where paginated history would not.
+
+        Fan-out still spends only rows you track; false positives (stale indexer
+        data) fail safely at broadcast time.
+        """
+        from tx_builder import get_change_address
+
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        address = get_change_address()
+        net = "main" if BSV_NETWORK.lower() in ("main", "mainnet", "livenet") else "test"
+        base = WHATSONCHAIN_BASE_URL.rstrip("/")
+        url = f"{base}/{net}/address/{address}/unspent"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=timeout_seconds)
+            response.raise_for_status()
+            payload = response.json()
+
+        if not isinstance(payload, list):
+            raise ValueError("WhatsOnChain unspent response was not a JSON array")
+
+        parsed: list[tuple[str, int, int]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            txid = item.get("tx_hash") or item.get("txid")
+            pos = item.get("tx_pos")
+            if pos is None:
+                pos = item.get("vout")
+            val = item.get("value")
+            if txid is None or pos is None or val is None:
+                continue
+            try:
+                parsed.append((str(txid), int(pos), int(val)))
+            except (TypeError, ValueError):
+                continue
+
+        parsed.sort(key=lambda x: -x[2])
+        if len(parsed) > max_utxos:
+            logger.warning(
+                "Capping WOC unspent import at %s of %s outputs",
+                max_utxos,
+                len(parsed),
+            )
+            parsed = parsed[:max_utxos]
+
+        n_reg = await self.bulk_register_reserve_utxos(parsed)
+        metrics = await self.reserve_funding_metrics()
+        return {
+            "status": "ok",
+            "address": address,
+            "woc_url": url,
+            "fetched_unspent": len(payload),
+            "parsed_valid": len(parsed),
+            "upserted_rows": n_reg,
+            "reserve_count": metrics["reserve_count"],
+            "reserve_total_sat": metrics["reserve_total_sat"],
+        }
 
     async def pool_metrics(self) -> dict[str, int]:
         """

@@ -71,6 +71,10 @@ UVICORN_ACCESS_LOG: bool = os.getenv("UVICORN_ACCESS_LOG", "0").strip().lower() 
 # Server Configuration
 VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
 
+# Optional: protects POST /utxo/sync-reserves-woc (bulk import of unspents from WhatsOnChain).
+# Generate a long random string; send header X-OceanChain-Admin-Key: <value>.
+OCEANCHAIN_ADMIN_API_KEY: str = os.getenv("OCEANCHAIN_ADMIN_API_KEY", "").strip()
+
 # Transaction Constants
 OP_RETURN_PREFIX: bytes = b"OCEANCHAIN"
 # Second push after prefix: compact 20-byte binary (default), or UTF-8 minified JSON for human-readable explorers.
@@ -153,4 +157,5 @@ def get_config_summary() -> dict:
         "log_summary_interval_seconds": LOG_SUMMARY_INTERVAL_SECONDS,
         "verbose_arc_logs": VERBOSE_ARC_LOGS,
         "uvicorn_access_log": UVICORN_ACCESS_LOG,
+        "admin_api_key_configured": bool(OCEANCHAIN_ADMIN_API_KEY),
     }

@@ -92,6 +92,10 @@ def main() -> int:
     print("  -H 'Content-Type: application/json' \\")
     print(f"  -d '{json.dumps(body)}'")
     print("\nThen: curl -sS -X POST http://127.0.0.1:8000/utxo/refill")
+    print()
+    print("--- Or on a running node (after setting OCEANCHAIN_ADMIN_API_KEY): ---")
+    print("curl -sS -X POST http://127.0.0.1:8000/utxo/sync-reserves-woc \\")
+    print("  -H 'X-OceanChain-Admin-Key: YOUR_ADMIN_KEY'")
     return 0
 
 

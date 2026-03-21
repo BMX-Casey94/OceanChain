@@ -7,17 +7,19 @@ broadcasting for real-time transaction updates.
 
 import asyncio
 import logging
+import secrets
 import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, Field
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from config import VPS_API_PORT, UVICORN_ACCESS_LOG
+from config import OCEANCHAIN_ADMIN_API_KEY, VPS_API_PORT, UVICORN_ACCESS_LOG
 from utxo_manager import utxo_manager
 
 logger = logging.getLogger(__name__)
@@ -207,7 +209,8 @@ async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
     Record a `reserve` UTXO in Postgres for fan-out funding.
 
     Use the real confirmed txid, vout, and value (satoshis) from your wallet.
-    Vessel broadcasts only consume `pool` rows created after a successful fan-out.
+    For many UTXOs, prefer `POST /utxo/sync-reserves-woc` (admin key) if WhatsOnChain
+    unspent is reachable. Vessel broadcasts only consume `pool` rows after fan-out.
     """
     try:
         txid = body.txid.strip().lower()
@@ -229,6 +232,71 @@ async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
     except Exception as e:
         logger.error("register_reserve_utxo failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
+
+
+def _admin_key_authorised(provided: str | None) -> bool:
+    if not OCEANCHAIN_ADMIN_API_KEY or provided is None:
+        return False
+    try:
+        a = provided.encode("utf-8")
+        b = OCEANCHAIN_ADMIN_API_KEY.encode("utf-8")
+    except Exception:
+        return False
+    if len(a) != len(b):
+        return False
+    return secrets.compare_digest(a, b)
+
+
+@app.post("/utxo/sync-reserves-woc")
+async def sync_reserves_woc(
+    x_oceanchain_admin_key: str | None = Header(
+        default=None,
+        alias="X-OceanChain-Admin-Key",
+    ),
+) -> JSONResponse:
+    """
+    Bulk-import current unspent outputs for this node's P2PKH from WhatsOnChain
+    as internal `reserve` rows (one HTTP round-trip + DB upsert).
+
+    Requires `OCEANCHAIN_ADMIN_API_KEY` in `.env` and the same value in header
+    `X-OceanChain-Admin-Key`. Bind the API to localhost or protect with a firewall;
+    do not expose this key over untrusted networks without TLS.
+    """
+    if not OCEANCHAIN_ADMIN_API_KEY:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Set OCEANCHAIN_ADMIN_API_KEY in .env to enable this endpoint",
+            },
+            status_code=503,
+        )
+    if not _admin_key_authorised(x_oceanchain_admin_key):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    try:
+        result = await utxo_manager.sync_reserves_from_whatsonchain()
+        return JSONResponse(result)
+    except httpx.HTTPStatusError as e:
+        logger.error("WOC sync HTTP error: %s", e, exc_info=True)
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"WhatsOnChain HTTP {e.response.status_code}",
+            },
+            status_code=502,
+        )
+    except httpx.RequestError as e:
+        logger.error("WOC sync request failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": f"WhatsOnChain unreachable: {e}"},
+            status_code=502,
+        )
+    except Exception as e:
+        logger.error("sync_reserves_woc failed: %s", e, exc_info=True)
         return JSONResponse(
             {"status": "error", "message": str(e)},
             status_code=500,
