@@ -181,14 +181,19 @@ oceanchain/
 
    `POST /utxo/refill` spends **unlocked `reserve`** rows from PostgreSQL, builds and broadcasts the fan-out via ARC, then atomically updates the database: spent reserves removed, new **`pool`** outputs inserted, and any change output recorded as **`reserve`** again.
 
-   **Bulk reserve import (busy wallets):** with the service running, after setting **`OCEANCHAIN_ADMIN_API_KEY`** in `.env` and restarting:
+   **Bulk reserve import (busy wallets / no indexer):** with the service running, after setting **`OCEANCHAIN_ADMIN_API_KEY`** in `.env` and restarting, either:
+
+   - **`POST /utxo/sync-reserves-woc`** (WhatsOnChain unspent only — often **fails** if the address has a massive tx count), or
+   - **`POST /utxo/reserves/bulk-import`** with JSON **`{"utxos":[{"txid":"…64 hex…","vout":0,"value_sat":123456}]}`** — no WhatsOnChain; data from your node, a consolidation tx you sent yourself, or any trusted export.
 
    ```bash
-   curl -sS -X POST http://127.0.0.1:8000/utxo/sync-reserves-woc \
-     -H "X-OceanChain-Admin-Key: YOUR_KEY_HERE"
+   curl -sS -X POST http://127.0.0.1:8000/utxo/reserves/bulk-import \
+     -H "Content-Type: application/json" \
+     -H "X-OceanChain-Admin-Key: YOUR_KEY_HERE" \
+     -d '{"utxos":[{"txid":"abcd…64 chars…","vout":0,"value_sat":90000000}]}'
    ```
 
-   Then **`POST /utxo/refill`** as above. Restrict port **8000** (firewall / localhost + SSH tunnel) so this admin header is not exposed on the public Internet without TLS.
+   Then **`POST /utxo/refill`** as above. Restrict port **8000** (firewall / localhost + SSH tunnel) so admin routes are not exposed without TLS.
 
 6. **Install systemd service**
    ```bash
@@ -212,7 +217,8 @@ oceanchain/
 | `/engine/pause` | POST | Pause broadcasting loop |
 | `/engine/resume` | POST | Resume broadcasting loop |
 | `/utxo/reserve` | POST | Register a confirmed funding UTXO (`reserve`) for internal fan-out |
-| `/utxo/sync-reserves-woc` | POST | Bulk `reserve` import from WhatsOnChain unspent (requires `OCEANCHAIN_ADMIN_API_KEY` + `X-OceanChain-Admin-Key`) |
+| `/utxo/sync-reserves-woc` | POST | Bulk `reserve` import from WhatsOnChain unspent (admin key; may fail on huge wallets) |
+| `/utxo/reserves/bulk-import` | POST | Bulk `reserve` import from JSON body — **no WhatsOnChain** (admin key) |
 | `/utxo/refill` | POST | Fan-out from internal `reserve` rows into the `pool` |
 | `/ws` | WebSocket | Real-time TX, stats and UTXO pool events on the same `VPS_API_PORT` |
 

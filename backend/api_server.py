@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -203,14 +203,39 @@ class ReserveUtxoBody(BaseModel):
     value_sat: int = Field(..., ge=1)
 
 
+class BulkReserveUtxoItem(BaseModel):
+    """One row for admin bulk reserve import (no indexers)."""
+
+    txid: str = Field(..., min_length=64, max_length=64)
+    vout: int = Field(..., ge=0)
+    value_sat: int = Field(..., ge=1)
+
+
+class BulkReserveImportBody(BaseModel):
+    """POST body for /utxo/reserves/bulk-import."""
+
+    utxos: list[BulkReserveUtxoItem] = Field(
+        ...,
+        max_length=25000,
+        description="Confirmed unspent outputs for this wallet (txid, vout, value_sat).",
+    )
+
+    @field_validator("utxos")
+    @classmethod
+    def _non_empty(cls, v: list[BulkReserveUtxoItem]) -> list[BulkReserveUtxoItem]:
+        if not v:
+            raise ValueError("utxos must not be empty")
+        return v
+
+
 @app.post("/utxo/reserve")
 async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
     """
     Record a `reserve` UTXO in Postgres for fan-out funding.
 
     Use the real confirmed txid, vout, and value (satoshis) from your wallet.
-    For many UTXOs, prefer `POST /utxo/sync-reserves-woc` (admin key) if WhatsOnChain
-    unspent is reachable. Vessel broadcasts only consume `pool` rows after fan-out.
+    For many rows without indexers, use `POST /utxo/reserves/bulk-import` (admin key).
+    Vessel broadcasts only consume `pool` rows after fan-out.
     """
     try:
         txid = body.txid.strip().lower()
@@ -297,6 +322,63 @@ async def sync_reserves_woc(
         )
     except Exception as e:
         logger.error("sync_reserves_woc failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
+
+
+@app.post("/utxo/reserves/bulk-import")
+async def bulk_import_reserves(
+    body: BulkReserveImportBody,
+    x_oceanchain_admin_key: str | None = Header(
+        default=None,
+        alias="X-OceanChain-Admin-Key",
+    ),
+) -> JSONResponse:
+    """
+    Upsert many `reserve` rows from a JSON payload — **no WhatsOnChain**.
+
+    Use when indexers cannot serve your address (very large tx counts). Build the
+    list from any source you trust: explorer CSV export, your own full node,
+    `bitcoin-sv` RPC `listunspent`, a payment you sent to yourself (one output), etc.
+
+    Same auth as `/utxo/sync-reserves-woc` (`OCEANCHAIN_ADMIN_API_KEY`).
+    """
+    if not OCEANCHAIN_ADMIN_API_KEY:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Set OCEANCHAIN_ADMIN_API_KEY in .env to enable this endpoint",
+            },
+            status_code=503,
+        )
+    if not _admin_key_authorised(x_oceanchain_admin_key):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    try:
+        rows: list[tuple[str, int, int]] = []
+        for item in body.utxos:
+            txid = item.txid.strip().lower()
+            if any(c not in "0123456789abcdef" for c in txid):
+                return JSONResponse(
+                    {"status": "error", "message": f"Invalid txid (not 64 hex): {txid[:16]}…"},
+                    status_code=400,
+                )
+            rows.append((txid, item.vout, item.value_sat))
+
+        n = await utxo_manager.bulk_register_reserve_utxos(rows)
+        metrics = await utxo_manager.reserve_funding_metrics()
+        return JSONResponse(
+            {
+                "status": "ok",
+                "upserted_rows": n,
+                "reserve_count": metrics["reserve_count"],
+                "reserve_total_sat": metrics["reserve_total_sat"],
+            }
+        )
+    except Exception as e:
+        logger.error("bulk_import_reserves failed: %s", e, exc_info=True)
         return JSONResponse(
             {"status": "error", "message": str(e)},
             status_code=500,
