@@ -18,6 +18,38 @@ load_dotenv(dotenv_path=env_path, override=True)
 AISSTREAM_API_KEY: str = os.getenv("AISSTREAM_API_KEY", "")
 AISSTREAM_WS_URL: str = "wss://stream.aisstream.io/v0/stream"
 
+# Message types we can parse into the vessel snapshot (Phase 1 position-class). See docs/AIS_MESSAGE_EXPANSION_PLAN.md.
+SUPPORTED_AIS_POSITION_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "PositionReport",
+        "StandardClassBPositionReport",
+        "ExtendedClassBPositionReport",
+        "LongRangeAisBroadcastMessage",
+    }
+)
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _parse_aisstream_filter_message_types(raw: str) -> list[str]:
+    parts = [x.strip() for x in raw.split(",") if x.strip()]
+    if not parts:
+        return ["PositionReport"]
+    return _dedupe_preserve_order(parts)
+
+
+AISSTREAM_FILTER_MESSAGE_TYPES: list[str] = _parse_aisstream_filter_message_types(
+    os.getenv("AISSTREAM_FILTER_MESSAGE_TYPES", "PositionReport").strip()
+)
+
 # BSV Wallet Configuration
 BSV_PRIVATE_KEY_WIF: str = os.getenv("BSV_PRIVATE_KEY_WIF", "")
 BSV_NETWORK: str = os.getenv("BSV_NETWORK", "main")
@@ -48,6 +80,8 @@ UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").st
 # After a failed automatic fan-out, skip retry for this many seconds (reduces log spam when
 # wallet cannot yet afford UTXO_POOL_TARGET × UTXO_VALUE_EACH). Set 0 to retry every monitor tick.
 REFILL_FAILURE_COOLDOWN_SECONDS: int = int(os.getenv("REFILL_FAILURE_COOLDOWN_SECONDS", "900"))
+# When > 0, WhatsOnChain sync and admin bulk reserve import skip UTXOs below this value (reduces dust rows).
+RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
@@ -130,6 +164,16 @@ def validate_config() -> list[str]:
     if REFILL_FAILURE_COOLDOWN_SECONDS < 0:
         errors.append("REFILL_FAILURE_COOLDOWN_SECONDS must be >= 0")
 
+    if RESERVE_MIN_IMPORT_SAT < 0:
+        errors.append("RESERVE_MIN_IMPORT_SAT must be >= 0")
+
+    for mt in AISSTREAM_FILTER_MESSAGE_TYPES:
+        if mt not in SUPPORTED_AIS_POSITION_MESSAGE_TYPES:
+            errors.append(
+                f"AISSTREAM_FILTER_MESSAGE_TYPES: unsupported type {mt!r} "
+                f"(supported: {', '.join(sorted(SUPPORTED_AIS_POSITION_MESSAGE_TYPES))})"
+            )
+
     return errors
 
 
@@ -139,6 +183,7 @@ def get_config_summary() -> dict:
     """
     return {
         "aisstream_api_key": "***" if AISSTREAM_API_KEY else "(not set)",
+        "aisstream_filter_message_types": list(AISSTREAM_FILTER_MESSAGE_TYPES),
         "bsv_private_key_wif": "***" if BSV_PRIVATE_KEY_WIF else "(not set)",
         "bsv_network": BSV_NETWORK,
         "taal_api_key": "***" if TAAL_API_KEY else "(not set)",
@@ -158,4 +203,5 @@ def get_config_summary() -> dict:
         "verbose_arc_logs": VERBOSE_ARC_LOGS,
         "uvicorn_access_log": UVICORN_ACCESS_LOG,
         "admin_api_key_configured": bool(OCEANCHAIN_ADMIN_API_KEY),
+        "reserve_min_import_sat": RESERVE_MIN_IMPORT_SAT,
     }

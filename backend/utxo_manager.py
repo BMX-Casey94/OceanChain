@@ -20,6 +20,7 @@ from config import (
     BSV_NETWORK,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
+    RESERVE_MIN_IMPORT_SAT,
     WHATSONCHAIN_BASE_URL,
 )
 
@@ -255,26 +256,34 @@ class UTXOManager:
     async def bulk_register_reserve_utxos(
         self,
         rows: list[tuple[str, int, int]],
-    ) -> int:
+    ) -> tuple[int, int]:
         """
         Upsert many `reserve` rows in one transaction (for indexer bootstrap).
 
         Each tuple is (txid_hex, vout, value_sat). Invalid txids are skipped.
+
+        Returns:
+            (upserted_row_count, skipped_below_reserve_min_count)
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
 
         cleaned: list[tuple[str, int, int]] = []
+        skipped_below_min = 0
+        min_sat = RESERVE_MIN_IMPORT_SAT
         for txid, vout, value_sat in rows:
             t = txid.strip().lower()
             if len(t) != 64 or any(c not in "0123456789abcdef" for c in t):
                 continue
             if vout < 0 or value_sat < 1:
                 continue
+            if min_sat > 0 and value_sat < min_sat:
+                skipped_below_min += 1
+                continue
             cleaned.append((t, vout, value_sat))
 
         if not cleaned:
-            return 0
+            return 0, skipped_below_min
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -290,8 +299,16 @@ class UTXOManager:
                     cleaned,
                 )
 
-        logger.info("Bulk registered %s reserve UTXO row(s)", len(cleaned))
-        return len(cleaned)
+        if skipped_below_min:
+            logger.info(
+                "Bulk registered %s reserve UTXO row(s); skipped %s below RESERVE_MIN_IMPORT_SAT=%s",
+                len(cleaned),
+                skipped_below_min,
+                min_sat,
+            )
+        else:
+            logger.info("Bulk registered %s reserve UTXO row(s)", len(cleaned))
+        return len(cleaned), skipped_below_min
 
     async def sync_reserves_from_whatsonchain(
         self,
@@ -328,6 +345,8 @@ class UTXOManager:
             raise ValueError("WhatsOnChain unspent response was not a JSON array")
 
         parsed: list[tuple[str, int, int]] = []
+        skipped_small = 0
+        min_sat = RESERVE_MIN_IMPORT_SAT
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -339,7 +358,14 @@ class UTXOManager:
             if txid is None or pos is None or val is None:
                 continue
             try:
-                parsed.append((str(txid), int(pos), int(val)))
+                v_int = int(val)
+            except (TypeError, ValueError):
+                continue
+            if min_sat > 0 and v_int < min_sat:
+                skipped_small += 1
+                continue
+            try:
+                parsed.append((str(txid), int(pos), v_int))
             except (TypeError, ValueError):
                 continue
 
@@ -352,13 +378,15 @@ class UTXOManager:
             )
             parsed = parsed[:max_utxos]
 
-        n_reg = await self.bulk_register_reserve_utxos(parsed)
+        n_reg, skipped_bulk_min = await self.bulk_register_reserve_utxos(parsed)
         metrics = await self.reserve_funding_metrics()
         return {
             "status": "ok",
             "address": address,
             "woc_url": url,
             "fetched_unspent": len(payload),
+            "skipped_below_reserve_min": skipped_small + skipped_bulk_min,
+            "reserve_min_import_sat": min_sat,
             "parsed_valid": len(parsed),
             "upserted_rows": n_reg,
             "reserve_count": metrics["reserve_count"],

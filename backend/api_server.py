@@ -367,12 +367,13 @@ async def bulk_import_reserves(
                 )
             rows.append((txid, item.vout, item.value_sat))
 
-        n = await utxo_manager.bulk_register_reserve_utxos(rows)
+        n, skipped_min = await utxo_manager.bulk_register_reserve_utxos(rows)
         metrics = await utxo_manager.reserve_funding_metrics()
         return JSONResponse(
             {
                 "status": "ok",
                 "upserted_rows": n,
+                "skipped_below_reserve_min": skipped_min,
                 "reserve_count": metrics["reserve_count"],
                 "reserve_total_sat": metrics["reserve_total_sat"],
             }

@@ -143,9 +143,11 @@ def _encode_position_json(position: dict[str, Any]) -> bytes:
 
 def encode_position_for_op_return(position: dict[str, Any]) -> bytes:
     """Second push bytes: either 20-byte binary or JSON, per OP_RETURN_ENCODING."""
+    # Drop internal AIS client keys (e.g. _ais_message_type) — never on-chain.
+    public_pos = {k: v for k, v in position.items() if not str(k).startswith("_")}
     if OP_RETURN_ENCODING == "json":
-        return _encode_position_json(position)
-    return _encode_position_payload(position)
+        return _encode_position_json(public_pos)
+    return _encode_position_payload(public_pos)
 
 
 def _build_op_return_script(payload: bytes) -> Script:

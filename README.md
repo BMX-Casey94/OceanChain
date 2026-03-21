@@ -74,9 +74,15 @@ oceanchain/
 │   ├── .env.example
 │   └── systemd/
 │       └── oceanchain.service
+├── docs/                   # Architecture & rollout references
+│   └── AIS_MESSAGE_EXPANSION_PLAN.md
 ├── vercel.json
 └── README.md
 ```
+
+### Further documentation
+
+- **[AIS message expansion plan](docs/AIS_MESSAGE_EXPANSION_PLAN.md)** — Phased rollout for extra AISStream message types (Class B, SAR, static data, AtoN, safety), throughput guardrails, and monitoring checklist. Use this to add features **incrementally** and avoid unsustainable on-chain TPS.
 
 ---
 
@@ -144,6 +150,7 @@ oceanchain/
    Edit `.env` with your values:
    ```env
    AISSTREAM_API_KEY=your_aisstream_key
+   # Optional Phase 1: AISSTREAM_FILTER_MESSAGE_TYPES=PositionReport,StandardClassBPositionReport,ExtendedClassBPositionReport,LongRangeAisBroadcastMessage
    BSV_PRIVATE_KEY_WIF=your_funded_wallet_wif
    TAAL_API_KEY=your_taal_key
    DATABASE_URL=postgresql://oceanchain:your_secure_password@YOUR_VPS_IP:5432/oceanchain
