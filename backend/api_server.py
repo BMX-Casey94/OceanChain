@@ -11,7 +11,7 @@ import secrets
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -263,7 +263,7 @@ async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
         )
 
 
-def _admin_key_authorised(provided: str | None) -> bool:
+def _admin_key_authorised(provided: Optional[str]) -> bool:
     if not OCEANCHAIN_ADMIN_API_KEY or provided is None:
         return False
     try:
@@ -278,7 +278,7 @@ def _admin_key_authorised(provided: str | None) -> bool:
 
 @app.post("/utxo/sync-reserves-woc")
 async def sync_reserves_woc(
-    x_oceanchain_admin_key: str | None = Header(
+    x_oceanchain_admin_key: Optional[str] = Header(
         default=None,
         alias="X-OceanChain-Admin-Key",
     ),
@@ -331,7 +331,7 @@ async def sync_reserves_woc(
 @app.post("/utxo/reserves/bulk-import")
 async def bulk_import_reserves(
     body: BulkReserveImportBody,
-    x_oceanchain_admin_key: str | None = Header(
+    x_oceanchain_admin_key: Optional[str] = Header(
         default=None,
         alias="X-OceanChain-Admin-Key",
     ),
