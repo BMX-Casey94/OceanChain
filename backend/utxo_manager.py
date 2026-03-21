@@ -11,19 +11,19 @@ import time
 from typing import Any, Optional, Tuple
 
 import asyncpg
-import httpx
 
 from config import (
     UTXO_POOL_TARGET,
     UTXO_VALUE_EACH,
     BSV_PRIVATE_KEY_WIF,
-    BSV_NETWORK,
-    WHATSONCHAIN_BASE_URL,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
-    WOC_HTTP_TIMEOUT_SECONDS,
-    WOC_HTTP_RETRIES,
 )
+
+# Vessel broadcasts only spend `pool` rows. Fan-out funding uses `reserve` rows tracked in Postgres
+# (no WhatsOnChain listing — required for high-tx-count wallets).
+UTXO_ROLE_POOL = "pool"
+UTXO_ROLE_RESERVE = "reserve"
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,28 @@ class UTXOManager:
                 WHERE locked = FALSE
             """)
 
+            await conn.execute("""
+                ALTER TABLE utxos ADD COLUMN IF NOT EXISTS utxo_role TEXT NOT NULL DEFAULT 'pool'
+            """)
+            try:
+                await conn.execute("""
+                    ALTER TABLE utxos ADD CONSTRAINT utxos_utxo_role_check
+                    CHECK (utxo_role IN ('pool', 'reserve'))
+                """)
+            except asyncpg.DuplicateObjectError:
+                pass
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_utxos_pool_acquire
+                ON utxos (created_at ASC)
+                WHERE locked = FALSE AND utxo_role = 'pool'
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_utxos_reserve_funding
+                ON utxos (value_sat DESC)
+                WHERE locked = FALSE AND utxo_role = 'reserve'
+            """)
+
         self._initialized = True
         logger.info("UTXO manager initialized")
 
@@ -97,7 +119,7 @@ class UTXOManager:
                 UPDATE utxos SET locked = TRUE
                 WHERE (txid, vout) = (
                     SELECT txid, vout FROM utxos
-                    WHERE locked = FALSE AND value_sat >= $1
+                    WHERE locked = FALSE AND utxo_role = 'pool' AND value_sat >= $1
                     ORDER BY created_at ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
@@ -129,8 +151,10 @@ class UTXOManager:
 
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE utxos SET locked = FALSE WHERE txid = $1 AND vout = $2",
-                txid, vout
+                "UPDATE utxos SET locked = FALSE WHERE txid = $1 AND vout = $2 "
+                "AND utxo_role = 'pool'",
+                txid,
+                vout,
             )
 
         logger.debug(f"Released UTXO {txid}:{vout} back to pool")
@@ -154,39 +178,76 @@ class UTXOManager:
 
         logger.debug(f"Consumed UTXO {txid}:{vout}")
 
-    async def add_utxo(self, txid: str, vout: int, value_sat: int) -> None:
+    async def add_utxo(
+        self,
+        txid: str,
+        vout: int,
+        value_sat: int,
+        utxo_role: str = UTXO_ROLE_POOL,
+    ) -> None:
         """
-        Add a new UTXO to the pool (change output from a broadcast TX).
+        Add a tracked UTXO. Default role `pool` (vessel spends). Use `reserve` for fan-out funding.
 
         Args:
-            txid: Transaction ID
+            txid: Transaction ID (hex)
             vout: Output index
             value_sat: Value in satoshis
+            utxo_role: `pool` or `reserve`
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
+        if utxo_role not in (UTXO_ROLE_POOL, UTXO_ROLE_RESERVE):
+            raise ValueError(f"Invalid utxo_role: {utxo_role}")
 
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO utxos (txid, vout, value_sat)
-                VALUES ($1, $2, $3)
+                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
+                VALUES ($1, $2, $3, $4, FALSE)
                 ON CONFLICT (txid, vout) DO NOTHING
                 """,
-                txid, vout, value_sat
+                txid,
+                vout,
+                value_sat,
+                utxo_role,
             )
 
-        logger.debug(f"Added UTXO {txid}:{vout} ({value_sat} sat)")
+        logger.debug("Added UTXO %s:%s (%s sat) role=%s", txid, vout, value_sat, utxo_role)
 
-    async def _known_utxo_keys(self) -> set[tuple[str, int]]:
-        """Return every UTXO currently tracked in the local pool."""
+    async def register_reserve_utxo(self, txid: str, vout: int, value_sat: int) -> None:
+        """
+        Register a wallet funding UTXO for internal fan-out (no WhatsOnChain).
+
+        Returns True if a row was inserted or updated.
+        """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
+        txid = txid.strip().lower()
+        if len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
+            raise ValueError("txid must be 64 hex characters")
+        if vout < 0 or value_sat < 1:
+            raise ValueError("Invalid vout or value_sat")
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("SELECT txid, vout FROM utxos")
-
-        return {(str(row["txid"]), int(row["vout"])) for row in rows}
+            await conn.execute(
+                """
+                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
+                VALUES ($1, $2, $3, 'reserve', FALSE)
+                ON CONFLICT (txid, vout) DO UPDATE SET
+                    value_sat = EXCLUDED.value_sat,
+                    utxo_role = 'reserve',
+                    locked = FALSE
+                """,
+                txid,
+                vout,
+                value_sat,
+            )
+        logger.info(
+            "Registered reserve UTXO %s:%s (%s sat) for internal fan-out",
+            txid[:16],
+            vout,
+            value_sat,
+        )
 
     async def pool_metrics(self) -> dict[str, int]:
         """
@@ -215,6 +276,7 @@ class UTXOManager:
                         WHERE locked = FALSE AND value_sat >= $1
                     ), 0) AS spendable_balance
                 FROM utxos
+                WHERE utxo_role = 'pool'
                 """,
                 minimum_value,
             )
@@ -227,106 +289,57 @@ class UTXOManager:
             "spendable_balance": int(row["spendable_balance"] or 0),
         }
 
+    async def reserve_funding_metrics(self) -> dict[str, int]:
+        """Internal `reserve` UTXOs available to fund fan-out (WhatsOnChain-free)."""
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE locked = FALSE) AS n,
+                    COALESCE(SUM(value_sat) FILTER (WHERE locked = FALSE), 0) AS total_sat
+                FROM utxos
+                WHERE utxo_role = 'reserve'
+                """
+            )
+
+        return {
+            "reserve_count": int(row["n"] or 0),
+            "reserve_total_sat": int(row["total_sat"] or 0),
+        }
+
     async def pool_depth(self) -> int:
         """Return the count of unlocked, viable UTXOs in the pool."""
         metrics = await self.pool_metrics()
         return metrics["spendable_depth"]
 
-    async def _fetch_wallet_utxos(self, endpoint: str) -> list[dict[str, Any]]:
+    async def _collect_internal_reserve_candidates(self) -> list[dict[str, Any]]:
         """
-        Fetch wallet UTXOs from WhatsOnChain for the configured key address.
-
-        Args:
-            endpoint: One of `confirmed/unspent` or `unspent/all`
+        Funding UTXOs for fan-out: `reserve` role rows only (no external indexers).
         """
-        from tx_builder import get_change_address
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
 
-        address = get_change_address()
-        url = f"{WHATSONCHAIN_BASE_URL}/{BSV_NETWORK}/address/{address}/{endpoint}"
-        token: Optional[str] = None
-        results: list[dict[str, Any]] = []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT txid, vout, value_sat
+                FROM utxos
+                WHERE utxo_role = 'reserve' AND locked = FALSE
+                ORDER BY value_sat DESC
+                """
+            )
 
-        timeout = httpx.Timeout(WOC_HTTP_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient() as client:
-            while True:
-                params: dict[str, Any] = {"limit": 1000}
-                if token:
-                    params["token"] = token
-
-                response: Optional[httpx.Response] = None
-                attempts = max(1, WOC_HTTP_RETRIES + 1)
-                for attempt in range(attempts):
-                    try:
-                        response = await client.get(url, params=params, timeout=timeout)
-                        break
-                    except (
-                        httpx.ReadTimeout,
-                        httpx.ConnectTimeout,
-                        httpx.ConnectError,
-                    ) as e:
-                        if attempt + 1 >= attempts:
-                            raise
-                        delay = min(60.0, 2.0**attempt)
-                        logger.warning(
-                            "WhatsOnChain %s slow/unreachable (%s), retry %s/%s in %.1fs",
-                            endpoint,
-                            e,
-                            attempt + 1,
-                            attempts,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                assert response is not None
-                response.raise_for_status()
-                data = response.json()
-
-                if data.get("error"):
-                    raise RuntimeError(f"WhatsOnChain error: {data['error']}")
-
-                batch = data.get("result") or []
-                results.extend(batch)
-
-                token = response.headers.get("next-page") or response.headers.get("x-next-page")
-                if not token or not batch:
-                    break
-
-        return results
-
-    async def _collect_wallet_utxo_candidates(self) -> list[dict[str, Any]]:
-        """
-        All spendable wallet UTXOs from WhatsOnChain (deduped), excluding rows
-        already tracked in the Postgres pool. Confirmed entries are ingested
-        before mempool so behaviour stays predictable when both endpoints overlap.
-        """
-        known_utxos = await self._known_utxo_keys()
-        seen: set[tuple[str, int]] = set()
-        collected: list[dict[str, Any]] = []
-
-        for endpoint in ("confirmed/unspent", "unspent/all"):
-            for item in await self._fetch_wallet_utxos(endpoint):
-                txid = str(item.get("tx_hash", ""))
-                vout = int(item.get("tx_pos", -1))
-                key = (txid, vout)
-                if key in seen:
-                    continue
-                value_sat = int(item.get("value", 0))
-                if not txid or vout < 0:
-                    continue
-                if item.get("isSpentInMempoolTx"):
-                    continue
-                if key in known_utxos:
-                    continue
-
-                seen.add(key)
-                collected.append({
-                    "txid": txid,
-                    "vout": vout,
-                    "value_sat": value_sat,
-                    "status": str(item.get("status", "unknown")),
-                })
-
-        collected.sort(key=lambda row: row["value_sat"], reverse=True)
-        return collected
+        return [
+            {
+                "txid": str(r["txid"]),
+                "vout": int(r["vout"]),
+                "value_sat": int(r["value_sat"]),
+            }
+            for r in rows
+        ]
 
     def _pick_fanout_funding_inputs(
         self,
@@ -402,7 +415,7 @@ class UTXOManager:
 
             total_output_value = UTXO_POOL_TARGET * UTXO_VALUE_EACH
 
-            candidates = await self._collect_wallet_utxo_candidates()
+            candidates = await self._collect_internal_reserve_candidates()
             picked = self._pick_fanout_funding_inputs(candidates, total_output_value)
             if not picked:
                 total_avail = sum(c["value_sat"] for c in candidates)
@@ -412,7 +425,6 @@ class UTXOManager:
                 def _est_vbytes(n_in: int, n_out: int) -> int:
                     return 10 + n_in * 148 + n_out * 34
 
-                # If we used every candidate as input, approximate fee + total required
                 fee_if_all_inputs = (
                     calculate_fee(_est_vbytes(n_c, UTXO_POOL_TARGET + 1))
                     if n_c > 0
@@ -421,8 +433,9 @@ class UTXOManager:
                 approx_total_need = total_output_value + fee_if_all_inputs
                 logger.error(
                     "Cannot fund fan-out: need ~%s sat (outputs %s×%s=%s + ~%s fee w/ %s inputs); "
-                    "non-pool wallet total %s sat, largest UTXO %s sat. "
-                    "Add BSV, lower UTXO_POOL_TARGET/UTXO_VALUE_EACH, or consolidate.",
+                    "internal reserve total %s sat, largest %s sat. "
+                    "POST /utxo/reserve with {txid,vout,value_sat} for funding UTXOs, "
+                    "or lower UTXO_POOL_TARGET / UTXO_VALUE_EACH.",
                     approx_total_need,
                     UTXO_POOL_TARGET,
                     UTXO_VALUE_EACH,
@@ -476,13 +489,43 @@ class UTXOManager:
             raw_tx_hex = tx.to_bytes().hex()
             txid = await submit_raw(raw_tx_hex)
 
-            for vout in range(UTXO_POOL_TARGET):
-                await self.add_utxo(txid, vout, UTXO_VALUE_EACH)
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    for u in funding_utxos:
+                        await conn.execute(
+                            """
+                            DELETE FROM utxos
+                            WHERE txid = $1 AND vout = $2 AND utxo_role = 'reserve'
+                            """,
+                            u["txid"],
+                            u["vout"],
+                        )
+                    for vout in range(UTXO_POOL_TARGET):
+                        await conn.execute(
+                            """
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
+                            VALUES ($1, $2, $3, 'pool', FALSE)
+                            """,
+                            txid,
+                            vout,
+                            UTXO_VALUE_EACH,
+                        )
+                    if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
+                        await conn.execute(
+                            """
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
+                            VALUES ($1, $2, $3, 'reserve', FALSE)
+                            """,
+                            txid,
+                            UTXO_POOL_TARGET,
+                            change_value,
+                        )
 
             if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
                 logger.info(
-                    "Fan-out preserved %s sat as an external wallet funding UTXO",
+                    "Fan-out change %s sat recorded as internal reserve (vout %s)",
                     change_value,
+                    UTXO_POOL_TARGET,
                 )
 
             logger.info(f"Fan-out complete: {txid} with {UTXO_POOL_TARGET} outputs")

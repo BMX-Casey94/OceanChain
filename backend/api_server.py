@@ -12,6 +12,8 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
@@ -112,20 +114,24 @@ async def health_check() -> JSONResponse:
     """
     try:
         pool_metrics = await utxo_manager.pool_metrics()
+        reserve_metrics = await utxo_manager.reserve_funding_metrics()
     except Exception:
         pool_metrics = {
             "spendable_depth": -1,
             "spendable_balance": -1,
             "minimum_viable_utxo_value": -1,
         }
-    
+        reserve_metrics = {"reserve_count": -1, "reserve_total_sat": -1}
+
     uptime_seconds = time.time() - state.start_time
-    
+
     return JSONResponse({
         "status": "ok",
         "pool_depth": pool_metrics["spendable_depth"],
         "pool_balance_sat": pool_metrics["spendable_balance"],
         "minimum_viable_utxo_value": pool_metrics["minimum_viable_utxo_value"],
+        "reserve_count": reserve_metrics["reserve_count"],
+        "reserve_total_sat": reserve_metrics["reserve_total_sat"],
         "paused": state.paused,
         "uptime_seconds": round(uptime_seconds, 1),
     })
@@ -187,12 +193,54 @@ async def resume_engine() -> JSONResponse:
     return JSONResponse({"status": "resumed"})
 
 
+class ReserveUtxoBody(BaseModel):
+    """Register a funding UTXO for internal fan-out (no WhatsOnChain)."""
+
+    txid: str = Field(..., min_length=64, max_length=64)
+    vout: int = Field(..., ge=0)
+    value_sat: int = Field(..., ge=1)
+
+
+@app.post("/utxo/reserve")
+async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
+    """
+    Record a `reserve` UTXO in Postgres for fan-out funding.
+
+    Use the real confirmed txid, vout, and value (satoshis) from your wallet.
+    Vessel broadcasts only consume `pool` rows created after a successful fan-out.
+    """
+    try:
+        txid = body.txid.strip().lower()
+        if any(c not in "0123456789abcdef" for c in txid):
+            return JSONResponse(
+                {"status": "error", "message": "txid must be 64 hex characters"},
+                status_code=400,
+            )
+        await utxo_manager.register_reserve_utxo(txid, body.vout, body.value_sat)
+        metrics = await utxo_manager.reserve_funding_metrics()
+        return JSONResponse(
+            {
+                "status": "success",
+                "reserve_count": metrics["reserve_count"],
+                "reserve_total_sat": metrics["reserve_total_sat"],
+            }
+        )
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error("register_reserve_utxo failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
+
+
 @app.post("/utxo/refill")
 async def trigger_refill() -> JSONResponse:
     """
     Manually trigger a UTXO pool fan-out refill.
-    
-    Returns the transaction ID of the fan-out transaction.
+
+    Funds the fan-out from internal `reserve` rows only (see POST /utxo/reserve).
     """
     try:
         txid = await utxo_manager.fan_out_refill()
@@ -200,7 +248,10 @@ async def trigger_refill() -> JSONResponse:
             return JSONResponse({"status": "success", "txid": txid})
         else:
             return JSONResponse(
-                {"status": "error", "message": "No source UTXO available"},
+                {
+                    "status": "error",
+                    "message": "No internal reserve UTXO set covers fan-out; POST /utxo/reserve first",
+                },
                 status_code=500,
             )
     except Exception as e:
@@ -318,19 +369,23 @@ async def broadcast_utxo_event() -> None:
     
     try:
         metrics = await utxo_manager.pool_metrics()
+        reserve = await utxo_manager.reserve_funding_metrics()
     except Exception:
         metrics = {
             "spendable_depth": -1,
             "spendable_balance": -1,
             "minimum_viable_utxo_value": -1,
         }
-    
+        reserve = {"reserve_count": -1, "reserve_total_sat": -1}
+
     message = {
         "type": "utxo",
         "data": {
             "depth": metrics["spendable_depth"],
             "balance_sat": metrics["spendable_balance"],
             "minimum_viable_utxo_value": metrics["minimum_viable_utxo_value"],
+            "reserve_count": reserve["reserve_count"],
+            "reserve_total_sat": reserve["reserve_total_sat"],
         },
     }
     

@@ -159,22 +159,27 @@ oceanchain/
    
    The wallet address derived from `BSV_PRIVATE_KEY_WIF` must cover the **fan-out** (roughly `UTXO_POOL_TARGET × UTXO_VALUE_EACH` plus fan-out fees) and ongoing per-vessel fees (see `FEE_RATE_SAT_PER_KB`). Smaller `UTXO_VALUE_EACH` (e.g. 2000–5000 sat) is usually enough for each AIS broadcast; increase if you use large JSON OP_RETURN payloads.
 
+   **Internal UTXO tracking:** For wallets with very large transaction counts, third-party indexers may time out. OceanChain therefore does **not** discover funding UTXOs from WhatsOnChain. You must register each large funding output you intend to spend in fan-out as a **`reserve`** row via `POST /utxo/reserve` (after it is confirmed on-chain). The **`pool`** rows are the per-vessel spend outputs maintained by the service.
+
 5. **Initialize UTXO pool**
    ```bash
    # Start the service temporarily
    cd /opt/oceanchain/backend
    sudo -u oceanchain venv/bin/python main.py &
    
-   # Trigger initial UTXO fan-out from the funded wallet
+   # Register confirmed funding output(s) for fan-out (repeat per UTXO you control)
+   curl -X POST http://localhost:8000/utxo/reserve \
+     -H "Content-Type: application/json" \
+     -d '{"txid":"<64-char_hex>","vout":0,"value_sat":50000000}'
+   
+   # Trigger fan-out from internal reserve rows into the pool (+ change back to reserve)
    curl -X POST http://localhost:8000/utxo/refill
    
    # Stop temporary process
    kill %1
    ```
 
-   `POST /utxo/refill` now looks up the funded wallet address on-chain, selects
-   a large funding UTXO that is not already tracked in PostgreSQL, and fans it
-   out into the database-backed pool.
+   `POST /utxo/refill` spends **unlocked `reserve`** rows from PostgreSQL, builds and broadcasts the fan-out via ARC, then atomically updates the database: spent reserves removed, new **`pool`** outputs inserted, and any change output recorded as **`reserve`** again.
 
 6. **Install systemd service**
    ```bash
@@ -197,7 +202,8 @@ oceanchain/
 | `/stats/timeseries` | GET | TX counts per minute (last 60 min) |
 | `/engine/pause` | POST | Pause broadcasting loop |
 | `/engine/resume` | POST | Resume broadcasting loop |
-| `/utxo/refill` | POST | Manually trigger UTXO fan-out |
+| `/utxo/reserve` | POST | Register a confirmed funding UTXO (`reserve`) for internal fan-out |
+| `/utxo/refill` | POST | Fan-out from internal `reserve` rows into the `pool` |
 | `/ws` | WebSocket | Real-time TX, stats and UTXO pool events on the same `VPS_API_PORT` |
 
 ---

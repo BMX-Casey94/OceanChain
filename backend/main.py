@@ -178,8 +178,9 @@ async def broadcasting_loop() -> None:
             if pool_ready == 0:
                 logger.warning(
                     "UTXO pool is empty (%s vessels in AIS snapshot). "
-                    "Fund the wallet and run: curl -s -X POST http://127.0.0.1:%s/utxo/refill "
-                    "Or set UTXO_AUTO_REFILL_ON_START=1 in .env for a one-shot fan-out at startup.",
+                    "Register funding: curl -s -X POST http://127.0.0.1:%s/utxo/reserve "
+                    "-H 'Content-Type: application/json' "
+                    "-d '{\"txid\":\"...\",\"vout\":0,\"value_sat\":...}' then POST /utxo/refill.",
                     vessel_count,
                     VPS_API_PORT,
                 )
@@ -340,8 +341,8 @@ async def main() -> None:
     logger.info(f"Initial UTXO pool depth: {depth}")
     if depth == 0:
         logger.warning(
-            "UTXO pool is empty — no on-chain broadcasts will occur until the pool is filled. "
-            "Typical: curl -s -X POST http://127.0.0.1:%s/utxo/refill (wallet needs one large UTXO).",
+            "UTXO pool is empty — register internal reserve UTXO(s) then fan-out. "
+            "POST http://127.0.0.1:%s/utxo/reserve JSON {txid,vout,value_sat}, then POST /utxo/refill.",
             VPS_API_PORT,
         )
         if UTXO_AUTO_REFILL_ON_START:
@@ -350,9 +351,9 @@ async def main() -> None:
                 txid = await utxo_manager.fan_out_refill()
             except Exception as e:
                 logger.error(
-                    "Automatic fan-out raised %s (often WhatsOnChain ReadTimeout on busy addresses). "
-                    "Increase WOC_HTTP_TIMEOUT_SECONDS / WOC_HTTP_RETRIES in .env, or set "
-                    "UTXO_AUTO_REFILL_ON_START=0, start the app, then POST /utxo/refill. Error: %s",
+                    "Automatic fan-out failed (%s). "
+                    "Ensure POST /utxo/reserve has funding rows, or set UTXO_AUTO_REFILL_ON_START=0 "
+                    "and run POST /utxo/refill after registering reserve UTXOs. Error: %s",
                     type(e).__name__,
                     e,
                     exc_info=True,
@@ -364,8 +365,8 @@ async def main() -> None:
             elif UTXO_AUTO_REFILL_ON_START:
                 logger.error(
                     "Automatic fan-out did not complete. "
-                    "Ensure wallet has a UTXO covering roughly UTXO_POOL_TARGET × UTXO_VALUE_EACH "
-                    "plus fees, and that WhatsOnChain is reachable (see WOC_* env vars)."
+                    "Register internal reserve UTXO(s) via POST /utxo/reserve (sum must cover "
+                    "UTXO_POOL_TARGET × UTXO_VALUE_EACH plus fees), then POST /utxo/refill."
                 )
 
     # Create tasks
