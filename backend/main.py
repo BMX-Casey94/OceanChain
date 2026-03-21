@@ -346,14 +346,26 @@ async def main() -> None:
         )
         if UTXO_AUTO_REFILL_ON_START:
             logger.info("UTXO_AUTO_REFILL_ON_START=1: attempting fan-out refill from wallet…")
-            txid = await utxo_manager.fan_out_refill()
+            try:
+                txid = await utxo_manager.fan_out_refill()
+            except Exception as e:
+                logger.error(
+                    "Automatic fan-out raised %s (often WhatsOnChain ReadTimeout on busy addresses). "
+                    "Increase WOC_HTTP_TIMEOUT_SECONDS / WOC_HTTP_RETRIES in .env, or set "
+                    "UTXO_AUTO_REFILL_ON_START=0, start the app, then POST /utxo/refill. Error: %s",
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                txid = None
             if txid:
                 depth = await utxo_manager.pool_depth()
                 logger.info("Fan-out tx %s recorded; spendable pool depth now: %s", txid, depth)
-            else:
+            elif UTXO_AUTO_REFILL_ON_START:
                 logger.error(
-                    "Automatic fan-out failed (no suitable wallet UTXO or broadcast error). "
-                    "Ensure one confirmed UTXO covers roughly UTXO_POOL_TARGET × UTXO_VALUE_EACH plus fees."
+                    "Automatic fan-out did not complete. "
+                    "Ensure wallet has a UTXO covering roughly UTXO_POOL_TARGET × UTXO_VALUE_EACH "
+                    "plus fees, and that WhatsOnChain is reachable (see WOC_* env vars)."
                 )
 
     # Create tasks

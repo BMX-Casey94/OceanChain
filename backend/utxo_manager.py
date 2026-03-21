@@ -21,6 +21,8 @@ from config import (
     WHATSONCHAIN_BASE_URL,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
+    WOC_HTTP_TIMEOUT_SECONDS,
+    WOC_HTTP_RETRIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -244,13 +246,37 @@ class UTXOManager:
         token: Optional[str] = None
         results: list[dict[str, Any]] = []
 
+        timeout = httpx.Timeout(WOC_HTTP_TIMEOUT_SECONDS)
         async with httpx.AsyncClient() as client:
             while True:
                 params: dict[str, Any] = {"limit": 1000}
                 if token:
                     params["token"] = token
 
-                response = await client.get(url, params=params, timeout=20.0)
+                response: Optional[httpx.Response] = None
+                attempts = max(1, WOC_HTTP_RETRIES + 1)
+                for attempt in range(attempts):
+                    try:
+                        response = await client.get(url, params=params, timeout=timeout)
+                        break
+                    except (
+                        httpx.ReadTimeout,
+                        httpx.ConnectTimeout,
+                        httpx.ConnectError,
+                    ) as e:
+                        if attempt + 1 >= attempts:
+                            raise
+                        delay = min(60.0, 2.0**attempt)
+                        logger.warning(
+                            "WhatsOnChain %s slow/unreachable (%s), retry %s/%s in %.1fs",
+                            endpoint,
+                            e,
+                            attempt + 1,
+                            attempts,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                assert response is not None
                 response.raise_for_status()
                 data = response.json()
 

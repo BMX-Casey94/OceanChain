@@ -27,6 +27,9 @@ TAAL_API_KEY: str = os.getenv("TAAL_API_KEY", "")
 GORILLA_ARC_URL: str = "https://arc.gorillapool.io/v1/tx"
 TAAL_ARC_URL: str = "https://arc.taal.com/v1/tx"
 WHATSONCHAIN_BASE_URL: str = "https://api.whatsonchain.com/v1/bsv"
+# Busy addresses can exceed 20s; fan-out/refill uses this for each paginated WOC request.
+WOC_HTTP_TIMEOUT_SECONDS: float = float(os.getenv("WOC_HTTP_TIMEOUT_SECONDS", "120"))
+WOC_HTTP_RETRIES: int = int(os.getenv("WOC_HTTP_RETRIES", "4"))
 
 # Database Configuration
 DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/oceanchain")
@@ -126,6 +129,11 @@ def validate_config() -> list[str]:
     if REFILL_FAILURE_COOLDOWN_SECONDS < 0:
         errors.append("REFILL_FAILURE_COOLDOWN_SECONDS must be >= 0")
 
+    if WOC_HTTP_TIMEOUT_SECONDS < 5:
+        errors.append("WOC_HTTP_TIMEOUT_SECONDS must be >= 5")
+    if WOC_HTTP_RETRIES < 0:
+        errors.append("WOC_HTTP_RETRIES must be >= 0")
+
     return errors
 
 
@@ -143,6 +151,8 @@ def get_config_summary() -> dict:
         "utxo_value_each": UTXO_VALUE_EACH,
         "utxo_auto_refill_on_start": UTXO_AUTO_REFILL_ON_START,
         "refill_failure_cooldown_seconds": REFILL_FAILURE_COOLDOWN_SECONDS,
+        "woc_http_timeout_seconds": WOC_HTTP_TIMEOUT_SECONDS,
+        "woc_http_retries": WOC_HTTP_RETRIES,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "vps_api_port": VPS_API_PORT,
