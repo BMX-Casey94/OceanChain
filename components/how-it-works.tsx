@@ -19,7 +19,7 @@ const steps = [
     number: "03",
     icon: ShieldCheck,
     title: "Broadcast & Mine",
-    description: "Transactions are submitted to GorillaPool ARC with automatic TAAL fallback. Once mined, the position record is permanently written to the BSV blockchain — immutable, tamper-proof, and publicly verifiable by anyone.",
+    description: "Transactions are submitted to GorillaPool Arcade with automatic TAAL fallback. Once mined, the position record is permanently written to the BSV blockchain — immutable, tamper-proof, and publicly verifiable by anyone.",
   },
 ]
 

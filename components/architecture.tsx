@@ -20,8 +20,8 @@ const flowSteps = [
   },
   {
     icon: Send,
-    name: "GorillaPool ARC",
-    description: "Primary broadcaster via ARC protocol with TAAL fallback",
+    name: "GorillaPool Arcade",
+    description: "Primary broadcaster (ARC-compatible) with TAAL fallback",
   },
   {
     icon: Database,

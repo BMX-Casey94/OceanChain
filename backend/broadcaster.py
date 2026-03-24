@@ -1,8 +1,8 @@
 """
 OceanChain Broadcaster Module
 
-Handles submission of raw transactions to ARC endpoints with
-GorillaPool as primary and TAAL as fallback.
+Handles submission of raw transactions to ARC-compatible endpoints with
+GorillaPool Arcade as primary and TAAL as fallback.
 """
 
 import asyncio
@@ -52,7 +52,7 @@ async def _submit_to_arc(
 ) -> dict[str, Any]:
     """
     Submit a transaction to an ARC endpoint.
-    GorillaPool requires no API key. TAAL requires Bearer token.
+    GorillaPool Arcade requires no API key. TAAL requires Bearer token.
     """
     start_time = time.monotonic()
 
@@ -99,7 +99,13 @@ async def _submit_to_arc(
 
     data = response.json()
     txid = data.get("txid") or data.get("txId") or data.get("hash")
-    status = data.get("status") or data.get("returnResult") or "unknown"
+    # Arcade returns txStatus (enum string); classic ARC uses status / returnResult.
+    status = (
+        data.get("status")
+        or data.get("returnResult")
+        or data.get("txStatus")
+        or "unknown"
+    )
 
     _arc_detail("Broadcast success via %s: txid=%s", broadcaster_name, txid)
     
@@ -114,7 +120,7 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
     """
     Submit a transaction with primary + fallback logic.
     
-    Attempts GorillaPool ARC first, with one retry on failure.
+    Attempts GorillaPool Arcade first, with one retry on failure.
     Falls back to TAAL ARC if GorillaPool fails twice.
     
     Args:
@@ -171,7 +177,7 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
 
 async def submit_raw(raw_tx_hex: str) -> str:
     """
-    Thin wrapper for fan-out transactions - GorillaPool only, no fallback.
+    Thin wrapper for fan-out transactions - GorillaPool Arcade only, no fallback.
     
     Fan-out failure should halt and alert, so we don't use fallback
     to avoid confusion about which outputs were created.

@@ -5,7 +5,7 @@ const badges = [
   "FastAPI",
   "BSV Blockchain",
   "AISstream.io",
-  "GorillaPool ARC",
+  "GorillaPool Arcade",
 ]
 
 export function OpenSourceCTA() {

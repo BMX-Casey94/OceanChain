@@ -18,7 +18,7 @@ OceanChain ingests real-time global maritime vessel position data via the AISstr
 │                       │                   │  └────────┘ └────┬────┘  │  │   │
 │                       │  ┌─────────────┐  │                  │       │  │   │
 │                       │  │ PostgreSQL  │◀─┤  ┌───────────────▼────┐  │  │   │
-│                       │  │ UTXO Pool   │  │  │ GorillaPool ARC    │  │  │   │
+│                       │  │ UTXO Pool   │  │  │ GorillaPool Arcade │  │  │   │
 │                       │  └─────────────┘  │  │ (TAAL fallback)    │  │  │   │
 │                       │                   │  └───────────────┬────┘  │  │   │
 │                       │  ┌─────────────┐  └──────────────────┼──────┘  │   │
@@ -42,7 +42,7 @@ OceanChain ingests real-time global maritime vessel position data via the AISstr
 - **Efficient Encoding**: 20-byte compact payload per vessel position
 - **Low Cost**: ~22 satoshis (~$0.000013 USD) per permanent record
 - **High Throughput**: UTXO fan-out pool for parallel transaction broadcasting
-- **Fault Tolerant**: GorillaPool ARC primary with automatic TAAL fallback
+- **Fault Tolerant**: GorillaPool Arcade primary with automatic TAAL fallback
 - **Publicly Verifiable**: All records on BSV blockchain, viewable on any explorer
 
 ## Project Structure
@@ -235,7 +235,7 @@ oceanchain/
 
 | Provider | URL | Documentation |
 |----------|-----|---------------|
-| GorillaPool | https://arc.gorillapool.io | [docs.gorillapool.io](https://docs.gorillapool.io) |
+| GorillaPool Arcade | https://arcade.gorillapool.io | [arcade.gorillapool.io/docs](https://arcade.gorillapool.io/docs) |
 | TAAL | https://arc.taal.com | [docs.taal.com](https://docs.taal.com) |
 
 ## Verifying Transactions

@@ -530,7 +530,7 @@ class UTXOManager:
 
         Constructs a single transaction with UTXO_POOL_TARGET outputs,
         each containing UTXO_VALUE_EACH satoshis. Broadcasts via
-        GorillaPool ARC (no fallback - fan-out failure should halt).
+        GorillaPool Arcade (no fallback - fan-out failure should halt).
 
         Returns:
             Transaction ID of the fan-out TX, or None on failure

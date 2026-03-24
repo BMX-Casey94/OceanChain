@@ -56,7 +56,9 @@ BSV_NETWORK: str = os.getenv("BSV_NETWORK", "main")
 
 # ARC Broadcaster Configuration
 TAAL_API_KEY: str = os.getenv("TAAL_API_KEY", "")
-GORILLA_ARC_URL: str = "https://arc.gorillapool.io/v1/tx"
+# GorillaPool Arcade (ARC-compatible); higher-throughput path vs legacy arc.gorillapool.io/v1/tx.
+# Override with GORILLA_ARC_URL if needed (e.g. rollback).
+GORILLA_ARC_URL: str = os.getenv("GORILLA_ARC_URL", "https://arcade.gorillapool.io/tx")
 TAAL_ARC_URL: str = "https://arc.taal.com/v1/tx"
 WHATSONCHAIN_BASE_URL: str = "https://api.whatsonchain.com/v1/bsv"
 
@@ -187,6 +189,7 @@ def get_config_summary() -> dict:
         "bsv_private_key_wif": "***" if BSV_PRIVATE_KEY_WIF else "(not set)",
         "bsv_network": BSV_NETWORK,
         "taal_api_key": "***" if TAAL_API_KEY else "(not set)",
+        "gorilla_arc_url": GORILLA_ARC_URL,
         "database_url": DATABASE_URL[:30] + "..." if len(DATABASE_URL) > 30 else DATABASE_URL,
         "utxo_pool_target": UTXO_POOL_TARGET,
         "utxo_value_each": UTXO_VALUE_EACH,
