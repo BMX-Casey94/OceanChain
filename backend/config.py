@@ -87,8 +87,8 @@ RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
-# Max concurrent vessel broadcasts (ARC + DB per task). Raise gradually (e.g. 75–100) if ARC/Postgres tolerate load.
-BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "50"))
+# Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
+BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "250"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
 LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
 # Per-HTTP-request ARC logs at INFO when true; otherwise DEBUG only (summary still INFO).
