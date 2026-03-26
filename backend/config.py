@@ -169,10 +169,9 @@ def validate_config() -> list[str]:
 
     if UTXO_POOL_TARGET < 1:
         errors.append("UTXO_POOL_TARGET must be >= 1")
-    if UTXO_VALUE_EACH < 500:
+    if UTXO_VALUE_EACH < 60:
         errors.append(
-            "UTXO_VALUE_EACH should be >= 500 sat (needs to cover fee + min change; "
-            "use 2000–5000+ for JSON OP_RETURN / headroom)"
+            "UTXO_VALUE_EACH must be >= 60 sat (worst-case fee ~34 sat + dust margin)"
         )
 
     if REFILL_FAILURE_COOLDOWN_SECONDS < 0:
