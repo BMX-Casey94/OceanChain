@@ -15,6 +15,9 @@ Example (from `backend/` with venv active):
 Then trigger fan-out:
 
   curl -sS -X POST http://127.0.0.1:8000/utxo/refill
+
+To locate the largest unspents without scanning tx history, see
+`scripts/list_largest_bitails_unspents.py`.
 """
 from __future__ import annotations
 
