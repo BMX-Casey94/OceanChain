@@ -16,10 +16,18 @@ from config import (
     TAAL_API_KEY,
     GORILLA_ARC_URL,
     TAAL_ARC_URL,
+    ARC_MAX_TIMEOUT_SECONDS,
+    ARC_WAIT_FOR_STATUS,
     VERBOSE_ARC_LOGS,
 )
 
 logger = logging.getLogger(__name__)
+
+_ARC_NETWORK_SUCCESS_STATUSES = {
+    "SEEN_ON_NETWORK",
+    "SEEN_IN_ORPHAN_MEMPOOL",
+    "MINED",
+}
 
 
 def _arc_detail(msg: str, *args: Any) -> None:
@@ -56,7 +64,11 @@ async def _submit_to_arc(
     """
     start_time = time.monotonic()
 
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "X-WaitFor": ARC_WAIT_FOR_STATUS,
+        "X-MaxTimeout": str(ARC_MAX_TIMEOUT_SECONDS),
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -72,10 +84,12 @@ async def _submit_to_arc(
     latency_ms = (time.monotonic() - start_time) * 1000
 
     _arc_detail(
-        "ARC submission to %s: status=%s latency=%.1fms",
+        "ARC submission to %s: http=%s latency=%.1fms wait_for=%s timeout=%ss",
         broadcaster_name,
         response.status_code,
         latency_ms,
+        ARC_WAIT_FOR_STATUS,
+        ARC_MAX_TIMEOUT_SECONDS,
     )
 
     if response.status_code >= 400:
@@ -107,7 +121,27 @@ async def _submit_to_arc(
         or "unknown"
     )
 
-    _arc_detail("Broadcast success via %s: txid=%s", broadcaster_name, txid)
+    _arc_detail(
+        "ARC response via %s: txid=%s txStatus=%s",
+        broadcaster_name,
+        txid,
+        status,
+    )
+
+    if status not in _ARC_NETWORK_SUCCESS_STATUSES:
+        raise BroadcastError(
+            f"ARC returned txStatus={status!r}, not a network-seen success",
+            gorilla_error=(
+                f"{broadcaster_name}:{status}"
+                if broadcaster_name == "gorillapool"
+                else None
+            ),
+            taal_error=(
+                f"{broadcaster_name}:{status}"
+                if broadcaster_name == "taal"
+                else None
+            ),
+        )
     
     return {
         "txid": txid,

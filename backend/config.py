@@ -89,6 +89,11 @@ RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
 # Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
 BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "250"))
+# Require ARC to wait until this tx lifecycle status before returning success.
+# Strong default: only count a broadcast as successful once ARC reports SEEN_ON_NETWORK.
+ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "SEEN_ON_NETWORK").strip().upper()
+# ARC request-side wait timeout in seconds (ARC docs: max 30, default 5).
+ARC_MAX_TIMEOUT_SECONDS: int = int(os.getenv("ARC_MAX_TIMEOUT_SECONDS", "10"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
 LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
 # Per-HTTP-request ARC logs at INFO when true; otherwise DEBUG only (summary still INFO).
@@ -181,6 +186,26 @@ def validate_config() -> list[str]:
     elif BROADCAST_CONCURRENCY > 512:
         errors.append("BROADCAST_CONCURRENCY must be <= 512")
 
+    allowed_arc_wait = {
+        "QUEUED",
+        "RECEIVED",
+        "STORED",
+        "ANNOUNCED_TO_NETWORK",
+        "REQUESTED_BY_NETWORK",
+        "SENT_TO_NETWORK",
+        "ACCEPTED_BY_NETWORK",
+        "SEEN_ON_NETWORK",
+    }
+    if ARC_WAIT_FOR_STATUS not in allowed_arc_wait:
+        errors.append(
+            "ARC_WAIT_FOR_STATUS must be one of: "
+            + ", ".join(sorted(allowed_arc_wait))
+        )
+    if ARC_MAX_TIMEOUT_SECONDS < 1:
+        errors.append("ARC_MAX_TIMEOUT_SECONDS must be >= 1")
+    elif ARC_MAX_TIMEOUT_SECONDS > 30:
+        errors.append("ARC_MAX_TIMEOUT_SECONDS must be <= 30")
+
     for mt in AISSTREAM_FILTER_MESSAGE_TYPES:
         if mt not in SUPPORTED_AIS_POSITION_MESSAGE_TYPES:
             errors.append(
@@ -210,6 +235,8 @@ def get_config_summary() -> dict:
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "broadcast_concurrency": BROADCAST_CONCURRENCY,
+        "arc_wait_for_status": ARC_WAIT_FOR_STATUS,
+        "arc_max_timeout_seconds": ARC_MAX_TIMEOUT_SECONDS,
         "vps_api_port": VPS_API_PORT,
         "fee_rate_sat_per_kb": FEE_RATE_SAT_PER_KB,
         "min_tx_fee_sat": MIN_TX_FEE_SAT,
