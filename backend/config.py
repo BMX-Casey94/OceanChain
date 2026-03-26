@@ -89,10 +89,10 @@ RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
 # Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
 BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "250"))
-# Require ARC to wait until this tx lifecycle status before returning success.
-# Strong default: only count a broadcast as successful once ARC reports SEEN_ON_NETWORK.
+# App-side ARC target status. The broadcaster submits first, then polls GET /tx/{txid}
+# until this lifecycle state is reached before counting the tx as successful.
 ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "SEEN_ON_NETWORK").strip().upper()
-# ARC request-side wait timeout in seconds (ARC docs: max 30, default 5).
+# Maximum seconds to wait for ARC status polling before retry/failover.
 ARC_MAX_TIMEOUT_SECONDS: int = int(os.getenv("ARC_MAX_TIMEOUT_SECONDS", "10"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
 LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
@@ -187,6 +187,7 @@ def validate_config() -> list[str]:
         errors.append("BROADCAST_CONCURRENCY must be <= 512")
 
     allowed_arc_wait = {
+        "UNKNOWN",
         "QUEUED",
         "RECEIVED",
         "STORED",
@@ -195,6 +196,10 @@ def validate_config() -> list[str]:
         "SENT_TO_NETWORK",
         "ACCEPTED_BY_NETWORK",
         "SEEN_ON_NETWORK",
+        "SEEN_IN_ORPHAN_MEMPOOL",
+        "MINED",
+        "CONFIRMED",
+        "IMMUTABLE",
     }
     if ARC_WAIT_FOR_STATUS not in allowed_arc_wait:
         errors.append(

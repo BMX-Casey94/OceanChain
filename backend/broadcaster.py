@@ -23,10 +23,31 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+_ARC_STATUS_RANK = {
+    "UNKNOWN": 0,
+    "QUEUED": 1,
+    "RECEIVED": 2,
+    "STORED": 3,
+    "ANNOUNCED_TO_NETWORK": 4,
+    "REQUESTED_BY_NETWORK": 5,
+    "SENT_TO_NETWORK": 6,
+    "ACCEPTED_BY_NETWORK": 7,
+    "SEEN_ON_NETWORK": 8,
+    "SEEN_IN_ORPHAN_MEMPOOL": 8,
+    "MINED": 9,
+    "CONFIRMED": 10,
+    "IMMUTABLE": 11,
+}
+
 _ARC_NETWORK_SUCCESS_STATUSES = {
     "SEEN_ON_NETWORK",
     "SEEN_IN_ORPHAN_MEMPOOL",
     "MINED",
+}
+
+_ARC_FINAL_FAILURE_STATUSES = {
+    "DOUBLE_SPEND_ATTEMPTED",
+    "REJECTED",
 }
 
 
@@ -51,6 +72,164 @@ class BroadcastError(Exception):
         self.taal_error = taal_error
 
 
+def _normalise_tx_status(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value).strip().upper().replace(" ", "_")
+
+
+def _extract_arc_response(data: dict[str, Any]) -> tuple[Optional[str], Any, Optional[str]]:
+    txid = data.get("txid") or data.get("txId") or data.get("hash")
+    api_status = data.get("status")
+    tx_status_raw = data.get("txStatus") or data.get("returnResult")
+    if tx_status_raw is None and isinstance(api_status, str):
+        tx_status_raw = api_status
+    return txid, api_status, _normalise_tx_status(tx_status_raw)
+
+
+def _target_status_reached(tx_status: str) -> bool:
+    if tx_status in _ARC_NETWORK_SUCCESS_STATUSES:
+        return True
+    target_rank = _ARC_STATUS_RANK.get(ARC_WAIT_FOR_STATUS)
+    current_rank = _ARC_STATUS_RANK.get(tx_status)
+    return (
+        target_rank is not None
+        and current_rank is not None
+        and current_rank >= target_rank
+    )
+
+
+def _status_url(submit_url: str, txid: str) -> str:
+    return f"{submit_url.rstrip('/')}/{txid}"
+
+
+def _error_kwargs(broadcaster_name: str, detail: str) -> dict[str, Optional[str]]:
+    return {
+        "gorilla_error": detail if broadcaster_name == "gorillapool" else None,
+        "taal_error": detail if broadcaster_name == "taal" else None,
+    }
+
+
+async def _poll_arc_status(
+    client: httpx.AsyncClient,
+    submit_url: str,
+    txid: str,
+    broadcaster_name: str,
+    api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    status_url = _status_url(submit_url, txid)
+    deadline = time.monotonic() + ARC_MAX_TIMEOUT_SECONDS
+    delay_seconds = 0.5
+    poll_attempt = 0
+    last_status: Optional[str] = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        await asyncio.sleep(min(delay_seconds, remaining))
+        poll_attempt += 1
+
+        try:
+            response = await client.get(
+                status_url,
+                headers=headers,
+                timeout=min(10.0, max(1.0, remaining)),
+            )
+        except httpx.HTTPError as exc:
+            last_status = f"status_check_error:{exc}"
+            _arc_detail(
+                "ARC status poll via %s failed: attempt=%s txid=%s error=%s",
+                broadcaster_name,
+                poll_attempt,
+                txid,
+                exc,
+            )
+            delay_seconds = min(delay_seconds * 1.5, 2.0)
+            continue
+
+        _arc_detail(
+            "ARC status poll via %s: attempt=%s http=%s txid=%s",
+            broadcaster_name,
+            poll_attempt,
+            response.status_code,
+            txid,
+        )
+
+        if response.status_code == 404:
+            last_status = "NOT_FOUND"
+            delay_seconds = min(delay_seconds * 1.5, 2.0)
+            continue
+
+        if response.status_code >= 400:
+            snippet = (response.text or "")[:2048]
+            if VERBOSE_ARC_LOGS:
+                logger.warning(
+                    "ARC status error body from %s (status %s): %s",
+                    broadcaster_name,
+                    response.status_code,
+                    snippet or "<empty>",
+                )
+            else:
+                logger.debug(
+                    "ARC status error body from %s (status %s): %s",
+                    broadcaster_name,
+                    response.status_code,
+                    snippet or "<empty>",
+                )
+            response.raise_for_status()
+
+        data = response.json()
+        _, api_status, tx_status = _extract_arc_response(data)
+
+        _arc_detail(
+            "ARC status via %s: txid=%s txStatus=%s apiStatus=%s",
+            broadcaster_name,
+            txid,
+            tx_status,
+            api_status,
+        )
+
+        if not tx_status:
+            raise BroadcastError(
+                f"ARC status response missing txStatus for {txid} (api status={api_status!r})",
+                **_error_kwargs(
+                    broadcaster_name,
+                    f"{broadcaster_name}:missing_txStatus:{api_status}",
+                ),
+            )
+
+        if tx_status in _ARC_FINAL_FAILURE_STATUSES:
+            raise BroadcastError(
+                f"ARC returned terminal failure txStatus={tx_status!r}",
+                **_error_kwargs(broadcaster_name, f"{broadcaster_name}:{tx_status}"),
+            )
+
+        if _target_status_reached(tx_status):
+            return {
+                "txid": txid,
+                "broadcaster": broadcaster_name,
+                "status": tx_status,
+            }
+
+        last_status = tx_status
+        delay_seconds = min(delay_seconds * 1.5, 2.0)
+
+    raise BroadcastError(
+        f"ARC did not reach {ARC_WAIT_FOR_STATUS!r} within {ARC_MAX_TIMEOUT_SECONDS}s "
+        f"(last status={last_status!r})",
+        **_error_kwargs(
+            broadcaster_name,
+            f"{broadcaster_name}:timeout_waiting_for:{ARC_WAIT_FOR_STATUS}:{last_status}",
+        ),
+    )
+
+
 async def _submit_to_arc(
     client: httpx.AsyncClient,
     url: str,
@@ -66,8 +245,7 @@ async def _submit_to_arc(
 
     headers: dict[str, str] = {
         "Content-Type": "application/json",
-        "X-WaitFor": ARC_WAIT_FOR_STATUS,
-        "X-MaxTimeout": str(ARC_MAX_TIMEOUT_SECONDS),
+        "Accept": "application/json",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -84,7 +262,7 @@ async def _submit_to_arc(
     latency_ms = (time.monotonic() - start_time) * 1000
 
     _arc_detail(
-        "ARC submission to %s: http=%s latency=%.1fms wait_for=%s timeout=%ss",
+        "ARC submission to %s: http=%s latency=%.1fms target_status=%s timeout=%ss",
         broadcaster_name,
         response.status_code,
         latency_ms,
@@ -112,21 +290,7 @@ async def _submit_to_arc(
     response.raise_for_status()
 
     data = response.json()
-    txid = data.get("txid") or data.get("txId") or data.get("hash")
-    # ARC responses usually contain both:
-    # - status: integer HTTP-style code (e.g. 200)
-    # - txStatus: enum lifecycle state (e.g. SEEN_ON_NETWORK)
-    # We must prefer txStatus; reading numeric status first turns every success
-    # into the bogus string/integer "200".
-    api_status = data.get("status")
-    tx_status_raw = data.get("txStatus") or data.get("returnResult")
-    if tx_status_raw is None and isinstance(api_status, str):
-        tx_status_raw = api_status
-    tx_status = (
-        str(tx_status_raw).strip().upper()
-        if tx_status_raw is not None
-        else None
-    )
+    txid, api_status, tx_status = _extract_arc_response(data)
 
     _arc_detail(
         "ARC response via %s: txid=%s txStatus=%s apiStatus=%s",
@@ -139,38 +303,38 @@ async def _submit_to_arc(
     if not tx_status:
         raise BroadcastError(
             f"ARC response missing txStatus (api status={api_status!r})",
-            gorilla_error=(
-                f"{broadcaster_name}:missing_txStatus:{api_status}"
-                if broadcaster_name == "gorillapool"
-                else None
-            ),
-            taal_error=(
-                f"{broadcaster_name}:missing_txStatus:{api_status}"
-                if broadcaster_name == "taal"
-                else None
+            **_error_kwargs(
+                broadcaster_name,
+                f"{broadcaster_name}:missing_txStatus:{api_status}",
             ),
         )
 
-    if tx_status not in _ARC_NETWORK_SUCCESS_STATUSES:
+    if not txid:
         raise BroadcastError(
-            f"ARC returned txStatus={tx_status!r}, not a network-seen success",
-            gorilla_error=(
-                f"{broadcaster_name}:{tx_status}"
-                if broadcaster_name == "gorillapool"
-                else None
-            ),
-            taal_error=(
-                f"{broadcaster_name}:{tx_status}"
-                if broadcaster_name == "taal"
-                else None
-            ),
+            "ARC response missing txid",
+            **_error_kwargs(broadcaster_name, f"{broadcaster_name}:missing_txid"),
         )
-    
-    return {
-        "txid": txid,
-        "broadcaster": broadcaster_name,
-        "status": tx_status,
-    }
+
+    if tx_status in _ARC_FINAL_FAILURE_STATUSES:
+        raise BroadcastError(
+            f"ARC returned terminal failure txStatus={tx_status!r}",
+            **_error_kwargs(broadcaster_name, f"{broadcaster_name}:{tx_status}"),
+        )
+
+    if _target_status_reached(tx_status):
+        return {
+            "txid": txid,
+            "broadcaster": broadcaster_name,
+            "status": tx_status,
+        }
+
+    return await _poll_arc_status(
+        client,
+        url,
+        str(txid),
+        broadcaster_name,
+        api_key=api_key,
+    )
 
 
 async def submit(raw_tx_hex: str) -> dict[str, Any]:
