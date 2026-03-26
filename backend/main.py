@@ -10,6 +10,7 @@ Runs all services concurrently:
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from typing import Any, Optional
@@ -23,6 +24,7 @@ from config import (
     VPS_API_PORT,
     UTXO_AUTO_REFILL_ON_START,
     LOG_SUMMARY_INTERVAL_SECONDS,
+    LOG_SAMPLE_RAW_TX_PATH,
     validate_config,
     get_config_summary,
 )
@@ -115,6 +117,17 @@ async def process_vessel(
                     txid_canon,
                 )
             broadcaster = result["broadcaster"]
+
+            if LOG_SAMPLE_RAW_TX_PATH and not os.path.exists(LOG_SAMPLE_RAW_TX_PATH):
+                try:
+                    with open(LOG_SAMPLE_RAW_TX_PATH, "w", encoding="ascii") as sf:
+                        sf.write(raw_tx_hex.strip())
+                    logger.info(
+                        "Diagnostic: wrote one sample raw tx to %s — run scripts/woc_decode_sample.sh",
+                        LOG_SAMPLE_RAW_TX_PATH,
+                    )
+                except OSError as werr:
+                    logger.warning("Could not write LOG_SAMPLE_RAW_TX_PATH: %s", werr)
             
             # Success: consume UTXO, add change output
             await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])

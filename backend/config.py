@@ -109,6 +109,11 @@ UVICORN_ACCESS_LOG: bool = os.getenv("UVICORN_ACCESS_LOG", "0").strip().lower() 
 # Server Configuration
 VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
 
+# Optional: on first successful vessel broadcast after startup, write raw tx hex to this path
+# (ASCII, one line) for offline checks: POST https://api.whatsonchain.com/v1/bsv/main/tx/decode
+# with JSON {"txhex":"..."}. See scripts/woc_decode_sample.sh
+LOG_SAMPLE_RAW_TX_PATH: str = os.getenv("LOG_SAMPLE_RAW_TX_PATH", "").strip()
+
 # Optional: protects POST /utxo/sync-reserves-woc (bulk import of unspents from WhatsOnChain).
 # Generate a long random string; send header X-OceanChain-Admin-Key: <value>.
 OCEANCHAIN_ADMIN_API_KEY: str = os.getenv("OCEANCHAIN_ADMIN_API_KEY", "").strip()
@@ -215,4 +220,5 @@ def get_config_summary() -> dict:
         "uvicorn_access_log": UVICORN_ACCESS_LOG,
         "admin_api_key_configured": bool(OCEANCHAIN_ADMIN_API_KEY),
         "reserve_min_import_sat": RESERVE_MIN_IMPORT_SAT,
+        "log_sample_raw_tx_configured": bool(LOG_SAMPLE_RAW_TX_PATH),
     }
