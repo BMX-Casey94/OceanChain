@@ -113,31 +113,54 @@ async def _submit_to_arc(
 
     data = response.json()
     txid = data.get("txid") or data.get("txId") or data.get("hash")
-    # Arcade returns txStatus (enum string); classic ARC uses status / returnResult.
-    status = (
-        data.get("status")
-        or data.get("returnResult")
-        or data.get("txStatus")
-        or "unknown"
+    # ARC responses usually contain both:
+    # - status: integer HTTP-style code (e.g. 200)
+    # - txStatus: enum lifecycle state (e.g. SEEN_ON_NETWORK)
+    # We must prefer txStatus; reading numeric status first turns every success
+    # into the bogus string/integer "200".
+    api_status = data.get("status")
+    tx_status_raw = data.get("txStatus") or data.get("returnResult")
+    if tx_status_raw is None and isinstance(api_status, str):
+        tx_status_raw = api_status
+    tx_status = (
+        str(tx_status_raw).strip().upper()
+        if tx_status_raw is not None
+        else None
     )
 
     _arc_detail(
-        "ARC response via %s: txid=%s txStatus=%s",
+        "ARC response via %s: txid=%s txStatus=%s apiStatus=%s",
         broadcaster_name,
         txid,
-        status,
+        tx_status,
+        api_status,
     )
 
-    if status not in _ARC_NETWORK_SUCCESS_STATUSES:
+    if not tx_status:
         raise BroadcastError(
-            f"ARC returned txStatus={status!r}, not a network-seen success",
+            f"ARC response missing txStatus (api status={api_status!r})",
             gorilla_error=(
-                f"{broadcaster_name}:{status}"
+                f"{broadcaster_name}:missing_txStatus:{api_status}"
                 if broadcaster_name == "gorillapool"
                 else None
             ),
             taal_error=(
-                f"{broadcaster_name}:{status}"
+                f"{broadcaster_name}:missing_txStatus:{api_status}"
+                if broadcaster_name == "taal"
+                else None
+            ),
+        )
+
+    if tx_status not in _ARC_NETWORK_SUCCESS_STATUSES:
+        raise BroadcastError(
+            f"ARC returned txStatus={tx_status!r}, not a network-seen success",
+            gorilla_error=(
+                f"{broadcaster_name}:{tx_status}"
+                if broadcaster_name == "gorillapool"
+                else None
+            ),
+            taal_error=(
+                f"{broadcaster_name}:{tx_status}"
                 if broadcaster_name == "taal"
                 else None
             ),
@@ -146,7 +169,7 @@ async def _submit_to_arc(
     return {
         "txid": txid,
         "broadcaster": broadcaster_name,
-        "status": status,
+        "status": tx_status,
     }
 
 
