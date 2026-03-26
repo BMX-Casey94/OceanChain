@@ -87,6 +87,8 @@ RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
+# Max concurrent vessel broadcasts (ARC + DB per task). Raise gradually (e.g. 75–100) if ARC/Postgres tolerate load.
+BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "50"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
 LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
 # Per-HTTP-request ARC logs at INFO when true; otherwise DEBUG only (summary still INFO).
@@ -169,6 +171,11 @@ def validate_config() -> list[str]:
     if RESERVE_MIN_IMPORT_SAT < 0:
         errors.append("RESERVE_MIN_IMPORT_SAT must be >= 0")
 
+    if BROADCAST_CONCURRENCY < 1:
+        errors.append("BROADCAST_CONCURRENCY must be >= 1")
+    elif BROADCAST_CONCURRENCY > 512:
+        errors.append("BROADCAST_CONCURRENCY must be <= 512")
+
     for mt in AISSTREAM_FILTER_MESSAGE_TYPES:
         if mt not in SUPPORTED_AIS_POSITION_MESSAGE_TYPES:
             errors.append(
@@ -197,6 +204,7 @@ def get_config_summary() -> dict:
         "refill_failure_cooldown_seconds": REFILL_FAILURE_COOLDOWN_SECONDS,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
+        "broadcast_concurrency": BROADCAST_CONCURRENCY,
         "vps_api_port": VPS_API_PORT,
         "fee_rate_sat_per_kb": FEE_RATE_SAT_PER_KB,
         "min_tx_fee_sat": MIN_TX_FEE_SAT,

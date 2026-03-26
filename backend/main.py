@@ -19,6 +19,7 @@ import asyncpg
 from config import (
     DATABASE_URL,
     BATCH_INTERVAL_SECONDS,
+    BROADCAST_CONCURRENCY,
     VPS_API_PORT,
     UTXO_AUTO_REFILL_ON_START,
     LOG_SUMMARY_INTERVAL_SECONDS,
@@ -146,10 +147,14 @@ async def broadcasting_loop() -> None:
     
     Every BATCH_INTERVAL_SECONDS:
     1. Get current vessel snapshot from AIS client
-    2. Process all vessels concurrently (capped at 50 in-flight)
+    2. Process all vessels concurrently (capped at BROADCAST_CONCURRENCY in-flight)
     3. Log batch statistics
     """
-    logger.info(f"Broadcasting loop starting, interval: {BATCH_INTERVAL_SECONDS}s")
+    logger.info(
+        "Broadcasting loop starting, interval: %ss, concurrency: %s",
+        BATCH_INTERVAL_SECONDS,
+        BROADCAST_CONCURRENCY,
+    )
     
     change_address = get_change_address()
     logger.info(f"Change address: {change_address}")
@@ -194,7 +199,7 @@ async def broadcasting_loop() -> None:
             update_vessel_count(vessel_count)
             
             # Process vessels concurrently with semaphore
-            semaphore = asyncio.Semaphore(50)
+            semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
             
             tasks = [
                 process_vessel(semaphore, mmsi, position, change_address)
