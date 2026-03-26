@@ -529,14 +529,15 @@ class UTXOManager:
         Create a fan-out transaction to refill the UTXO pool.
 
         Constructs a single transaction with UTXO_POOL_TARGET outputs,
-        each containing UTXO_VALUE_EACH satoshis. Broadcasts via
-        GorillaPool Arcade (no fallback - fan-out failure should halt).
+        each containing UTXO_VALUE_EACH satoshis. Broadcasts via ARC:
+        GorillaPool Arcade first, then TAAL ARC if ``TAAL_API_KEY`` is set
+        (same path as vessel txs).
 
         Returns:
             Transaction ID of the fan-out TX, or None on failure
         """
         from tx_builder import get_change_address, calculate_fee
-        from broadcaster import submit_raw
+        from broadcaster import submit, BroadcastError
         from bitcoinx import (
             PrivateKey,
             TxInput,
@@ -631,7 +632,29 @@ class UTXOManager:
                 tx.inputs[idx].script_sig = Script(script_sig)
 
             raw_tx_hex = tx.to_bytes().hex()
-            txid = await submit_raw(raw_tx_hex)
+            try:
+                broadcast = await submit(raw_tx_hex)
+            except BroadcastError as e:
+                logger.error(
+                    "Fan-out broadcast failed (all ARC endpoints): %s | gorilla=%s | taal=%s",
+                    e,
+                    e.gorilla_error,
+                    e.taal_error,
+                )
+                return None
+            except Exception as e:
+                logger.error("Fan-out broadcast failed: %s", e, exc_info=True)
+                return None
+
+            txid = broadcast.get("txid")
+            if not txid:
+                logger.error("Fan-out broadcast returned no txid: %s", broadcast)
+                return None
+            logger.info(
+                "Fan-out broadcast via %s (status=%s)",
+                broadcast.get("broadcaster"),
+                broadcast.get("status"),
+            )
 
             async with self._pool.acquire() as conn:
                 async with conn.transaction():
