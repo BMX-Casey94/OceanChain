@@ -27,7 +27,12 @@ from config import (
     get_config_summary,
 )
 from ais_client import ais_client
-from tx_builder import build_op_return_tx, get_change_address, calculate_fee
+from tx_builder import (
+    build_op_return_tx,
+    get_change_address,
+    calculate_fee,
+    canonical_txid_from_raw_hex,
+)
 from utxo_manager import utxo_manager
 from broadcaster import submit, BroadcastError
 from broadcast_stats import broadcast_stats
@@ -92,9 +97,23 @@ async def process_vessel(
             # Calculate fee for stats
             fee_sat = utxo["value_sat"] - change_value
             
-            # Submit transaction
+            # Submit transaction (store explorer-canonical txid; ARC may differ)
             result = await submit(raw_tx_hex)
-            txid = result["txid"]
+            txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
+            txid_arc = result.get("txid")
+            txid = txid_canon or (str(txid_arc).lower() if txid_arc else None)
+            if not txid:
+                raise RuntimeError("No txid from ARC and could not derive from raw tx")
+            if (
+                txid_canon
+                and txid_arc
+                and str(txid_arc).lower() != txid_canon
+            ):
+                logger.debug(
+                    "ARC txid %s != canonical hex_hash %s; using canonical for DB",
+                    txid_arc,
+                    txid_canon,
+                )
             broadcaster = result["broadcaster"]
             
             # Success: consume UTXO, add change output

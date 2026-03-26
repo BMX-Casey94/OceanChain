@@ -632,6 +632,9 @@ class UTXOManager:
                 tx.inputs[idx].script_sig = Script(script_sig)
 
             raw_tx_hex = tx.to_bytes().hex()
+            txid_canon = tx.hex_hash()
+            if txid_canon:
+                txid_canon = txid_canon.lower()
             try:
                 broadcast = await submit(raw_tx_hex)
             except BroadcastError as e:
@@ -646,10 +649,21 @@ class UTXOManager:
                 logger.error("Fan-out broadcast failed: %s", e, exc_info=True)
                 return None
 
-            txid = broadcast.get("txid")
+            txid_arc = broadcast.get("txid")
+            txid = txid_canon or (str(txid_arc).lower() if txid_arc else None)
             if not txid:
                 logger.error("Fan-out broadcast returned no txid: %s", broadcast)
                 return None
+            if (
+                txid_canon
+                and txid_arc
+                and str(txid_arc).lower() != txid_canon
+            ):
+                logger.debug(
+                    "ARC txid %s != local hex_hash %s; using canonical for DB",
+                    txid_arc,
+                    txid_canon,
+                )
             logger.info(
                 "Fan-out broadcast via %s (status=%s)",
                 broadcast.get("broadcaster"),

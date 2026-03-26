@@ -4,6 +4,10 @@
 # Txids are read from Postgres: each successful vessel tx records change at pool vout=1.
 # WOC is capped ~3 RPS — default pause 0.35s between requests (~2.8 RPS).
 #
+# Historical note: ARC sometimes returned a non-explorer txid; those rows 404 on WOC
+# until you deploy the canonical-txid fix. This script retries with byte-reversed hex
+# when the first lookup returns 404.
+#
 # Usage (from /opt/OceanChain/backend):
 #   chmod +x scripts/check_recent_txids_woc.sh
 #   ./scripts/check_recent_txids_woc.sh          # default N=10
@@ -63,13 +67,37 @@ if [[ ! -s "$list_file" ]]; then
   exit 1
 fi
 
+reverse_txid_bytes() {
+  # Explorer txid = byte-reversed double-SHA256; ARC occasionally returns the other form.
+  local h="${1,,}" i out=
+  [[ "${#h}" -eq 64 ]] || return 1
+  for ((i=62; i>=0; i-=2)); do
+    out+="${h:i:2}"
+  done
+  printf '%s\n' "$out"
+}
+
+woc_fetch() {
+  local id="$1"
+  curl -sS -o "$body_file" -w "%{http_code}" \
+    "https://api.whatsonchain.com/v1/bsv/${WOC_SEGMENT}/tx/hash/${id}"
+}
+
 echo "# WOC segment: bsv/$WOC_SEGMENT  sleep: ${SLEEP_SEC}s between calls"
 while IFS= read -r txid || [[ -n "$txid" ]]; do
   [[ -z "$txid" ]] && continue
-  url="https://api.whatsonchain.com/v1/bsv/${WOC_SEGMENT}/tx/hash/${txid}"
-  code="$(curl -sS -o "$body_file" -w "%{http_code}" "$url")"
+  code="$(woc_fetch "$txid")"
+  label=""
+  if [[ "$code" != "200" ]]; then
+    alt="$(reverse_txid_bytes "$txid" || true)"
+    if [[ -n "$alt" && "$alt" != "$txid" ]]; then
+      sleep "$SLEEP_SEC"
+      code="$(woc_fetch "$alt")"
+      label=" (byte-reversed → ${alt:0:16}…)"
+    fi
+  fi
   if [[ "$code" == "200" ]]; then
-    echo "OK   $txid"
+    echo "OK   $txid${label}"
   else
     body="$(head -c 240 "$body_file" | tr '\n' ' ' || true)"
     echo "FAIL $txid  HTTP_${code}  $body"

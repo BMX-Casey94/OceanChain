@@ -199,6 +199,21 @@ def minimum_viable_utxo_value() -> int:
     return calculate_fee(VESSEL_TX_FEE_WORST_CASE_BYTES) + MIN_CHANGE_OUTPUT_SAT
 
 
+def canonical_txid_from_raw_hex(raw_tx_hex: str) -> Optional[str]:
+    """
+    Block-explorer / WOC txid from fully signed raw hex.
+
+    Some ARC responses use a different presentation than explorers; bitcoinx
+    ``hex_hash`` matches WhatsOnChain and typical BSV explorers.
+    """
+    try:
+        tx = Tx.from_hex(raw_tx_hex)
+        h = tx.hex_hash()
+        return h.lower() if h else None
+    except Exception:
+        return None
+
+
 def build_op_return_tx(
     utxo: dict[str, Any],
     position: dict[str, Any],
