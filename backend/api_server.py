@@ -398,10 +398,14 @@ async def trigger_refill() -> JSONResponse:
         if txid:
             return JSONResponse({"status": "success", "txid": txid})
         else:
+            refill_error = (
+                utxo_manager.last_refill_error()
+                or "No internal reserve UTXO set covers fan-out; POST /utxo/reserve first"
+            )
             return JSONResponse(
                 {
                     "status": "error",
-                    "message": "No internal reserve UTXO set covers fan-out; POST /utxo/reserve first",
+                    "message": refill_error,
                 },
                 status_code=500,
             )

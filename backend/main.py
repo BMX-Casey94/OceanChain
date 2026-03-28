@@ -400,11 +400,15 @@ async def main() -> None:
                 depth = await utxo_manager.pool_depth()
                 logger.info("Fan-out tx %s recorded; spendable pool depth now: %s", txid, depth)
             elif UTXO_AUTO_REFILL_ON_START:
-                logger.error(
-                    "Automatic fan-out did not complete. "
-                    "Register internal reserve UTXO(s) via POST /utxo/reserve (sum must cover "
-                    "UTXO_POOL_TARGET × UTXO_VALUE_EACH plus fees), then POST /utxo/refill."
-                )
+                refill_error = utxo_manager.last_refill_error()
+                if refill_error:
+                    logger.error("Automatic fan-out did not complete: %s", refill_error)
+                else:
+                    logger.error(
+                        "Automatic fan-out did not complete. "
+                        "Register internal reserve UTXO(s) via POST /utxo/reserve (sum must cover "
+                        "UTXO_POOL_TARGET × UTXO_VALUE_EACH plus fees), then POST /utxo/refill."
+                    )
 
     # Create tasks
     tasks = [

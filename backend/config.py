@@ -82,6 +82,10 @@ UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").st
 # After a failed automatic fan-out, skip retry for this many seconds (reduces log spam when
 # wallet cannot yet afford UTXO_POOL_TARGET × UTXO_VALUE_EACH). Set 0 to retry every monitor tick.
 REFILL_FAILURE_COOLDOWN_SECONDS: int = int(os.getenv("REFILL_FAILURE_COOLDOWN_SECONDS", "900"))
+# Safety cap for a single fan-out refill. Very large multi-input refills are expensive,
+# slow to validate, and currently correlate with poor propagation / validator failures.
+# Set 0 to disable the cap.
+FANOUT_MAX_INPUTS: int = int(os.getenv("FANOUT_MAX_INPUTS", "512"))
 # When > 0, WhatsOnChain sync and admin bulk reserve import skip UTXOs below this value (reduces dust rows).
 RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
@@ -177,6 +181,9 @@ def validate_config() -> list[str]:
     if REFILL_FAILURE_COOLDOWN_SECONDS < 0:
         errors.append("REFILL_FAILURE_COOLDOWN_SECONDS must be >= 0")
 
+    if FANOUT_MAX_INPUTS < 0:
+        errors.append("FANOUT_MAX_INPUTS must be >= 0")
+
     if RESERVE_MIN_IMPORT_SAT < 0:
         errors.append("RESERVE_MIN_IMPORT_SAT must be >= 0")
 
@@ -236,6 +243,7 @@ def get_config_summary() -> dict:
         "utxo_value_each": UTXO_VALUE_EACH,
         "utxo_auto_refill_on_start": UTXO_AUTO_REFILL_ON_START,
         "refill_failure_cooldown_seconds": REFILL_FAILURE_COOLDOWN_SECONDS,
+        "fanout_max_inputs": FANOUT_MAX_INPUTS,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "broadcast_concurrency": BROADCAST_CONCURRENCY,

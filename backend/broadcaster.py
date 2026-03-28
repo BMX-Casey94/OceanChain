@@ -110,6 +110,67 @@ def _error_kwargs(broadcaster_name: str, detail: str) -> dict[str, Optional[str]
     }
 
 
+def _safe_exc_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return exc.__class__.__name__
+
+
+def _response_snippet(response: httpx.Response, limit: int = 300) -> str:
+    text = (response.text or "").strip()
+    if not text:
+        return "<empty>"
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _arc_http_detail(
+    broadcaster_name: str,
+    status_code: int,
+    snippet: str,
+    *,
+    during_status_poll: bool = False,
+) -> str:
+    phase = "status poll" if during_status_poll else "submit"
+    detail = f"{broadcaster_name} {phase} HTTP {status_code}: {snippet}"
+    if broadcaster_name == "gorillapool" and status_code == 467:
+        detail += (
+            " Validator/generic rejection from Arcade; check validator logs for "
+            "PreviousTx / merkle-path details. RawTx-only chained spends may need EF/BEEF."
+        )
+    elif broadcaster_name == "taal" and status_code == 460:
+        detail += (
+            " TAAL could not transform the tx to extended format; parent tx data may be "
+            "missing or not yet visible."
+        )
+    return detail
+
+
+def _raise_arc_http_error(
+    response: httpx.Response,
+    broadcaster_name: str,
+    *,
+    during_status_poll: bool = False,
+) -> None:
+    snippet = _response_snippet(response)
+    detail = _arc_http_detail(
+        broadcaster_name,
+        response.status_code,
+        snippet,
+        during_status_poll=during_status_poll,
+    )
+    raise BroadcastError(
+        detail,
+        **_error_kwargs(
+            broadcaster_name,
+            f"{broadcaster_name}:http_{response.status_code}:{snippet}",
+        ),
+    )
+
+
 async def _poll_arc_status(
     client: httpx.AsyncClient,
     submit_url: str,
@@ -167,22 +228,26 @@ async def _poll_arc_status(
             continue
 
         if response.status_code >= 400:
-            snippet = (response.text or "")[:2048]
+            snippet = _response_snippet(response, limit=2048)
             if VERBOSE_ARC_LOGS:
                 logger.warning(
                     "ARC status error body from %s (status %s): %s",
                     broadcaster_name,
                     response.status_code,
-                    snippet or "<empty>",
+                    snippet,
                 )
             else:
                 logger.debug(
                     "ARC status error body from %s (status %s): %s",
                     broadcaster_name,
                     response.status_code,
-                    snippet or "<empty>",
+                    snippet,
                 )
-            response.raise_for_status()
+            _raise_arc_http_error(
+                response,
+                broadcaster_name,
+                during_status_poll=True,
+            )
 
         data = response.json()
         _, api_status, tx_status = _extract_arc_response(data)
@@ -220,9 +285,19 @@ async def _poll_arc_status(
         last_status = tx_status
         delay_seconds = min(delay_seconds * 1.5, 2.0)
 
+    if last_status == "RECEIVED":
+        timeout_message = (
+            f"{broadcaster_name} kept the tx at RECEIVED for {ARC_MAX_TIMEOUT_SECONDS}s "
+            f"without reaching {ARC_WAIT_FOR_STATUS}; local acceptance did not turn into "
+            "network propagation"
+        )
+    else:
+        timeout_message = (
+            f"ARC did not reach {ARC_WAIT_FOR_STATUS!r} within {ARC_MAX_TIMEOUT_SECONDS}s "
+            f"(last status={last_status!r})"
+        )
     raise BroadcastError(
-        f"ARC did not reach {ARC_WAIT_FOR_STATUS!r} within {ARC_MAX_TIMEOUT_SECONDS}s "
-        f"(last status={last_status!r})",
+        timeout_message,
         **_error_kwargs(
             broadcaster_name,
             f"{broadcaster_name}:timeout_waiting_for:{ARC_WAIT_FOR_STATUS}:{last_status}",
@@ -271,23 +346,22 @@ async def _submit_to_arc(
     )
 
     if response.status_code >= 400:
-        snippet = (response.text or "")[:2048]
+        snippet = _response_snippet(response, limit=2048)
         if VERBOSE_ARC_LOGS:
             logger.warning(
                 "ARC error body from %s (status %s): %s",
                 broadcaster_name,
                 response.status_code,
-                snippet or "<empty>",
+                snippet,
             )
         else:
             logger.debug(
                 "ARC error body from %s (status %s): %s",
                 broadcaster_name,
                 response.status_code,
-                snippet or "<empty>",
+                snippet,
             )
-
-    response.raise_for_status()
+        _raise_arc_http_error(response, broadcaster_name)
 
     data = response.json()
     txid, api_status, tx_status = _extract_arc_response(data)
@@ -363,8 +437,8 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
                 client, GORILLA_ARC_URL, raw_tx_hex, "gorillapool"
             )
         except Exception as e:
-            gorilla_error = str(e)
-            _arc_detail("GorillaPool attempt 1 failed: %s", e)
+            gorilla_error = _safe_exc_text(e)
+            _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
         
         # Wait before retry
         await asyncio.sleep(2.0)
@@ -375,8 +449,8 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
                 client, GORILLA_ARC_URL, raw_tx_hex, "gorillapool"
             )
         except Exception as e:
-            gorilla_error = str(e)
-            _arc_detail("GorillaPool attempt 2 failed: %s", e)
+            gorilla_error = _safe_exc_text(e)
+            _arc_detail("GorillaPool attempt 2 failed: %s", gorilla_error)
         
         # Attempt 3: TAAL fallback when configured
         if TAAL_API_KEY:
@@ -385,8 +459,8 @@ async def submit(raw_tx_hex: str) -> dict[str, Any]:
                     client, TAAL_ARC_URL, raw_tx_hex, "taal", api_key=TAAL_API_KEY
                 )
             except Exception as e:
-                taal_error = str(e)
-                _arc_detail("TAAL fallback failed: %s", e)
+                taal_error = _safe_exc_text(e)
+                _arc_detail("TAAL fallback failed: %s", taal_error)
     
     # All attempts failed
     raise BroadcastError(

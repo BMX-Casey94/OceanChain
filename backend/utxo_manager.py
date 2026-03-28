@@ -18,6 +18,7 @@ from config import (
     UTXO_VALUE_EACH,
     BSV_PRIVATE_KEY_WIF,
     BSV_NETWORK,
+    FANOUT_MAX_INPUTS,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
     RESERVE_MIN_IMPORT_SAT,
@@ -46,6 +47,11 @@ class UTXOManager:
         self._refill_lock = asyncio.Lock()
         # time.monotonic() deadline; skip automatic fan-out retries until then after a failure
         self._refill_cooldown_until: float = 0.0
+        self._last_refill_error: Optional[str] = None
+
+    def last_refill_error(self) -> Optional[str]:
+        """Most recent fan-out refill failure message, if any."""
+        return self._last_refill_error
 
     async def initialize(self, pool: asyncpg.Pool) -> None:
         """
@@ -551,6 +557,7 @@ class UTXOManager:
         )
 
         async with self._refill_lock:
+            self._last_refill_error = None
             logger.info(f"Starting fan-out refill for {UTXO_POOL_TARGET} outputs")
 
             private_key = PrivateKey.from_WIF(BSV_PRIVATE_KEY_WIF)
@@ -576,30 +583,37 @@ class UTXOManager:
                     else 0
                 )
                 approx_total_need = total_output_value + fee_if_all_inputs
-                logger.error(
-                    "Cannot fund fan-out: need ~%s sat (outputs %s×%s=%s + ~%s fee w/ %s inputs); "
-                    "internal reserve total %s sat, largest %s sat. "
-                    "POST /utxo/reserve with {txid,vout,value_sat} for funding UTXOs, "
-                    "or lower UTXO_POOL_TARGET / UTXO_VALUE_EACH.",
-                    approx_total_need,
-                    UTXO_POOL_TARGET,
-                    UTXO_VALUE_EACH,
-                    total_output_value,
-                    fee_if_all_inputs,
-                    n_c,
-                    total_avail,
-                    largest,
+                self._last_refill_error = (
+                    "Cannot fund fan-out: need about "
+                    f"{approx_total_need} sat (outputs {UTXO_POOL_TARGET}x{UTXO_VALUE_EACH}="
+                    f"{total_output_value} + about {fee_if_all_inputs} fee with {n_c} inputs); "
+                    f"internal reserve total {total_avail} sat, largest {largest} sat. "
+                    "POST /utxo/reserve with {txid,vout,value_sat} for larger funding UTXOs, "
+                    "or lower UTXO_POOL_TARGET / UTXO_VALUE_EACH."
                 )
+                logger.error(self._last_refill_error)
                 return None
 
             funding_utxos, fee_sat, change_value, add_change_output = picked
             sum_in = sum(u["value_sat"] for u in funding_utxos)
+            est_outputs = UTXO_POOL_TARGET + (1 if add_change_output else 0)
+            est_bytes = 10 + len(funding_utxos) * 148 + est_outputs * 34
+            if FANOUT_MAX_INPUTS > 0 and len(funding_utxos) > FANOUT_MAX_INPUTS:
+                self._last_refill_error = (
+                    f"Refusing fan-out requiring {len(funding_utxos)} inputs "
+                    f"(about {est_bytes} bytes) because FANOUT_MAX_INPUTS={FANOUT_MAX_INPUTS}. "
+                    "Import larger reserve UTXOs, raise RESERVE_MIN_IMPORT_SAT / BITAILS_IMPORT_MIN_SAT "
+                    "for future imports, or lower UTXO_POOL_TARGET / UTXO_VALUE_EACH."
+                )
+                logger.error(self._last_refill_error)
+                return None
             logger.info(
-                "Fan-out funding: %s input(s), %s sat in, fee ~%s sat, change output=%s",
+                "Fan-out funding: %s input(s), %s sat in, fee ~%s sat, change output=%s, est_bytes~%s",
                 len(funding_utxos),
                 sum_in,
                 fee_sat,
                 add_change_output,
+                est_bytes,
             )
 
             outputs = [TxOutput(UTXO_VALUE_EACH, p2pkh_script) for _ in range(UTXO_POOL_TARGET)]
@@ -638,15 +652,15 @@ class UTXOManager:
             try:
                 broadcast = await submit(raw_tx_hex)
             except BroadcastError as e:
-                logger.error(
-                    "Fan-out broadcast failed (all ARC endpoints): %s | gorilla=%s | taal=%s",
-                    e,
-                    e.gorilla_error,
-                    e.taal_error,
+                self._last_refill_error = (
+                    f"Fan-out broadcast failed (all ARC endpoints): {e} | "
+                    f"gorilla={e.gorilla_error or '<none>'} | taal={e.taal_error or '<none>'}"
                 )
+                logger.error(self._last_refill_error)
                 return None
             except Exception as e:
-                logger.error("Fan-out broadcast failed: %s", e, exc_info=True)
+                self._last_refill_error = f"Fan-out broadcast failed: {type(e).__name__}: {e}"
+                logger.error(self._last_refill_error, exc_info=True)
                 return None
 
             txid_arc = broadcast.get("txid")
@@ -710,6 +724,7 @@ class UTXOManager:
                 )
 
             logger.info(f"Fan-out complete: {txid} with {UTXO_POOL_TARGET} outputs")
+            self._last_refill_error = None
             self._refill_cooldown_until = 0.0
             return txid
 

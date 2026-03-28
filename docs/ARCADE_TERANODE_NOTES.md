@@ -1,0 +1,126 @@
+# Arcade and Teranode Notes
+
+## Current OceanChain behaviour
+
+- OceanChain currently submits plain JSON `{"rawTx":"..."}` to ARC-compatible endpoints.
+- The client polls `GET /tx/{txid}` and only counts success once ARC reaches `SEEN_ON_NETWORK` (or a later status).
+- Vessel broadcasts use many parallel `POST /tx` calls.
+- Fan-out refills use the same broadcaster path, but far less frequently.
+
+## What the current evidence suggests
+
+### `txStatus=RECEIVED` is not a broadcast guarantee
+
+- `RECEIVED` means Arcade accepted the submission locally.
+- It does **not** guarantee network propagation.
+- If GorillaPool still reports `RECEIVED` and WhatsOnChain is still `404`, the transaction has not reached the wider network.
+
+### GorillaPool HTTP `467`
+
+- Client-side responses only show a generic error, for example:
+  - `{"title":"Generic error","status":467,"detail":"Transaction could not be processed"}`
+- Based on GorillaPool's server-side notes, this appears to come from validator-side verification failure rather than a transport-level rate-limit error.
+- One concrete validator-side error already observed is:
+  - `'PreviousTx' not supplied`
+- That strongly suggests some raw transaction submissions need parent transaction context that plain `rawTx` submission does not provide.
+
+### TAAL `460` / extended-format failures
+
+- TAAL errors such as "Missing input scripts" / "parent transaction not found" point in the same direction:
+  - the broadcaster can see the submitted transaction,
+  - but it cannot derive enough parent-input context to validate or transform it.
+
+### Raw tx vs EF / BEEF
+
+- OceanChain currently submits plain raw transactions, not EF / BEEF.
+- For chained spends, unconfirmed parents, or validator setups that do not already know the parent transaction, raw-only submission may be insufficient.
+- That is currently the clearest explanation for:
+  - GorillaPool `467`,
+  - GorillaPool transactions stuck at `RECEIVED`,
+  - TAAL extended-format / parent-lookup failures.
+
+## `POST /tx` vs `POST /txs`
+
+- `POST /txs` is **not** currently a throughput fix for OceanChain.
+- Based on the Arcade notes shared during debugging:
+  - `/txs` still validates and writes each transaction individually,
+  - transactions are processed sequentially inside the batch,
+  - one failure can abort the batch,
+  - a shared timeout can starve later transactions.
+- For the current Arcade implementation, parallel `POST /tx` calls remain the better fit for high-throughput broadcasting.
+
+## Why OceanChain "suddenly stops"
+
+### Dust exhaustion
+
+- Each successful vessel tx consumes one pool UTXO and adds its change back into the pool.
+- If `UTXO_VALUE_EACH` is too small, repeated chaining steadily decays every coin into dust.
+- Example at roughly `34 sat` fee per tx:
+  - `200 -> 166 -> 132 -> 98 -> 64 -> 30`
+- With a current minimum viable value of about `55 sat`, a `30 sat` output is dead dust.
+- This creates a cliff-edge failure mode:
+  - the service looks healthy,
+  - AIS ingest keeps rising,
+  - but `pool_depth` suddenly drops to `0` because all remaining rows are too small to spend.
+
+### Reserve fragmentation
+
+- If the reserve set is mostly tiny outputs, fan-out refills become huge multi-input transactions.
+- Example seen in production:
+  - `2268` fan-out inputs,
+  - about `197,213 sat` total input value,
+  - roughly `37,199 sat` fee,
+  - approximately `363 KB` transaction size.
+- That is operationally poor even before network propagation issues are considered.
+
+## Practical operating guidance
+
+- Prefer `UTXO_VALUE_EACH >= 1000` for sustained chaining.
+- `UTXO_VALUE_EACH=3000` remains the safer baseline in this project unless you have confirmed a better production profile.
+- Keep `RESERVE_MIN_IMPORT_SAT` and Bitails `--min-sat` / `BITAILS_IMPORT_MIN_SAT` high enough to avoid importing 40-50 sat dust into `reserve`.
+- Treat `ARC_MAX_TIMEOUT_SECONDS=1` as a diagnostic setting, not a production default.
+- Avoid giant refill fan-outs; larger reserve UTXOs are more important than a huge count of tiny ones.
+
+## Immediate VPS recovery playbook
+
+### 1. Confirm the current operating envelope
+
+```bash
+cd /opt/OceanChain/backend
+grep -E '^(UTXO_POOL_TARGET|UTXO_VALUE_EACH|RESERVE_MIN_IMPORT_SAT|ARC_MAX_TIMEOUT_SECONDS|FANOUT_MAX_INPUTS|OCEANCHAIN_FUNDING_ADDRESS)=' .env
+```
+
+### 2. Inspect the largest current wallet unspents from Bitails
+
+```bash
+cd /opt/OceanChain/backend
+set -a && source .env && set +a
+python scripts/list_largest_bitails_unspents.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --top 30 --min-sat 1000
+```
+
+### 3. Import only usable reserve UTXOs
+
+```bash
+cd /opt/OceanChain/backend
+set -a && source .env && set +a
+python scripts/import_reserves_bitails.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --min-sat 1000
+```
+
+### 4. Trigger one refill and verify
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/utxo/refill
+curl -sS http://127.0.0.1:8000/health | python -m json.tool
+journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-out|ARC response via|ARC status via|GorillaPool attempt|TAAL fallback|Summary'
+```
+
+### 5. If refill still fails
+
+- Import one or more larger reserve outputs manually with `POST /utxo/reserve`, or fund the wallet with a fresh larger UTXO.
+- Raise `UTXO_VALUE_EACH` back to a safer production value before rebuilding the pool.
+- Do not rely on `RECEIVED` alone; confirm using `GET /tx/{txid}` plus an external explorer.
+
+## References
+
+- GorillaPool / Arcade operational notes shared during OceanChain debugging.
+- Arcade project issue discussing current storage / infra limitations: [Feature: PostGres #30](https://github.com/bsv-blockchain/arcade/issues/30)
