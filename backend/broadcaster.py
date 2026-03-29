@@ -297,8 +297,18 @@ async def _poll_arc_status(
             )
 
         if tx_status in _ARC_FINAL_FAILURE_STATUSES:
+            detail = data.get("detail") or data.get("extraInfo") or ""
+            if detail:
+                logger.warning(
+                    "ARC terminal %s from %s during poll (txid=%s): %s",
+                    tx_status,
+                    broadcaster_name,
+                    txid,
+                    detail,
+                )
             raise BroadcastError(
-                f"ARC returned terminal failure txStatus={tx_status!r}",
+                f"ARC returned terminal failure txStatus={tx_status!r}: {detail}" if detail
+                else f"ARC returned terminal failure txStatus={tx_status!r}",
                 **_error_kwargs(broadcaster_name, f"{broadcaster_name}:{tx_status}"),
             )
 
@@ -417,8 +427,18 @@ async def _submit_to_arc(
         )
 
     if tx_status in _ARC_FINAL_FAILURE_STATUSES:
+        detail = data.get("detail") or data.get("extraInfo") or ""
+        if detail:
+            logger.warning(
+                "ARC terminal %s from %s (txid=%s): %s",
+                tx_status,
+                broadcaster_name,
+                txid,
+                detail,
+            )
         raise BroadcastError(
-            f"ARC returned terminal failure txStatus={tx_status!r}",
+            f"ARC returned terminal failure txStatus={tx_status!r}: {detail}" if detail
+            else f"ARC returned terminal failure txStatus={tx_status!r}",
             **_error_kwargs(broadcaster_name, f"{broadcaster_name}:{tx_status}"),
         )
 
