@@ -44,6 +44,38 @@
   - GorillaPool transactions stuck at `RECEIVED`,
   - TAAL extended-format / parent-lookup failures.
 
+## EF results (2026-03-29)
+
+### What EF resolved
+
+- Zero `467` validator errors (previously 100% of Gorilla submissions).
+- Zero `RECEIVED` timeouts (previously 100% of Gorilla submissions).
+- GorillaPool now returns `ACCEPTED_BY_NETWORK` for a portion of EF submissions — this never happened with raw tx.
+
+### Remaining `REJECTED` under load
+
+- With EF enabled at ~50 tx/sec sustained (250 concurrent connections), ~70-80% of Gorilla submissions return `txStatus=REJECTED` with HTTP 200.
+- Every rejection carries the identical detail:
+  ```
+  unexpected status code 500: Failed to process transaction: PROCESSING (4):
+  [ProcessTransaction][txid] failed to validate transaction
+  ```
+- The rejection rate oscillates in ~20-30 second waves (45% to 98%), consistent with backend queue saturation.
+- The same EF format is accepted for some txs and rejected for others within the same second — no format difference.
+- Rejected txids remain permanently `REJECTED` in Arcade's `GET /tx/{txid}` status endpoint.
+- Average submission latency: ~365ms (range 100ms–1s).
+
+### Interpretation
+
+- The `status code 500` and `PROCESSING (4)` indicate Arcade's Teranode submission pipeline is returning an internal server error during transaction processing, not a client format problem.
+- David (Arcade lead) confirmed Arcade was not designed as high-load infrastructure for service providers, and that direct Teranode broadcast for high-scale use is being explored.
+- The SQLite single-writer lock in Arcade serialises all DB writes; at ~50 tx/sec this likely contributes to the processing failures.
+
+### Client-side mitigations applied
+
+- **Skip Gorilla retry on terminal rejection**: when Gorilla returns `REJECTED` or `DOUBLE_SPEND_ATTEMPTED`, the client no longer wastes a 2-second retry to the same endpoint. It falls through to TAAL immediately.
+- **Consume UTXO on submitted-but-failed broadcast**: if a tx was actually submitted to at least one ARC endpoint but all endpoints ultimately failed, the UTXO is consumed (burned) rather than released back to the pool. This prevents double-spend cascades where a released UTXO gets re-spent in a later batch while the original tx is still propagating.
+
 ## `POST /tx` vs `POST /txs`
 
 - `POST /txs` is **not** currently a throughput fix for OceanChain.

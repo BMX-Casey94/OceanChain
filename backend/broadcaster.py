@@ -67,10 +67,12 @@ class BroadcastError(Exception):
         message: str,
         gorilla_error: Optional[str] = None,
         taal_error: Optional[str] = None,
+        tx_was_submitted: bool = False,
     ) -> None:
         super().__init__(message)
         self.gorilla_error = gorilla_error
         self.taal_error = taal_error
+        self.tx_was_submitted = tx_was_submitted
 
 
 def _normalise_tx_status(value: Any) -> Optional[str]:
@@ -501,37 +503,52 @@ async def submit(
             gorilla_error = _safe_exc_text(fmt_err)
             _arc_detail("Skipping GorillaPool submit: %s", gorilla_error)
 
+        tx_was_submitted = False
+        gorilla_terminal = False
+
         if gorilla_submit_enabled:
             # Attempt 1: GorillaPool (no API key needed)
             try:
+                tx_was_submitted = True
                 return await _submit_to_arc(
                     client,
                     GORILLA_ARC_URL,
                     selected_gorilla_tx_hex,
                     "gorillapool",
                 )
+            except BroadcastError as e:
+                gorilla_error = _safe_exc_text(e)
+                if any(s in gorilla_error for s in ("terminal failure", "REJECTED", "DOUBLE_SPEND")):
+                    gorilla_terminal = True
+                    _arc_detail(
+                        "GorillaPool attempt 1 terminal rejection, skipping retry: %s",
+                        gorilla_error,
+                    )
+                else:
+                    _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
             except Exception as e:
                 gorilla_error = _safe_exc_text(e)
                 _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
-            
-            # Wait before retry
-            await asyncio.sleep(2.0)
-            
-            # Attempt 2: GorillaPool retry
-            try:
-                return await _submit_to_arc(
-                    client,
-                    GORILLA_ARC_URL,
-                    selected_gorilla_tx_hex,
-                    "gorillapool",
-                )
-            except Exception as e:
-                gorilla_error = _safe_exc_text(e)
-                _arc_detail("GorillaPool attempt 2 failed: %s", gorilla_error)
+
+            if not gorilla_terminal:
+                await asyncio.sleep(2.0)
+                # Attempt 2: GorillaPool retry (only for non-terminal failures)
+                try:
+                    tx_was_submitted = True
+                    return await _submit_to_arc(
+                        client,
+                        GORILLA_ARC_URL,
+                        selected_gorilla_tx_hex,
+                        "gorillapool",
+                    )
+                except Exception as e:
+                    gorilla_error = _safe_exc_text(e)
+                    _arc_detail("GorillaPool attempt 2 failed: %s", gorilla_error)
         
-        # Attempt 3: TAAL fallback when configured
+        # TAAL fallback when configured
         if TAAL_API_KEY:
             try:
+                tx_was_submitted = True
                 return await _submit_to_arc(
                     client, TAAL_ARC_URL, raw_tx_hex, "taal", api_key=TAAL_API_KEY
                 )
@@ -539,11 +556,11 @@ async def submit(
                 taal_error = _safe_exc_text(e)
                 _arc_detail("TAAL fallback failed: %s", taal_error)
     
-    # All attempts failed
     raise BroadcastError(
-        f"All broadcast attempts failed",
+        "All broadcast attempts failed",
         gorilla_error=gorilla_error,
         taal_error=taal_error,
+        tx_was_submitted=tx_was_submitted,
     )
 
 

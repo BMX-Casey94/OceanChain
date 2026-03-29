@@ -189,7 +189,16 @@ async def process_vessel(
         except BroadcastError as e:
             await broadcast_stats.record_fail_broadcast(label, str(e))
             logger.debug("Broadcast failed for %s: %s", label, e)
-            await utxo_manager.release_utxo(utxo["txid"], utxo["vout"])
+            if e.tx_was_submitted:
+                await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
+                logger.debug(
+                    "Consumed UTXO %s:%s after failed broadcast (tx was submitted, "
+                    "releasing would risk double-spend)",
+                    utxo["txid"][:16],
+                    utxo["vout"],
+                )
+            else:
+                await utxo_manager.release_utxo(utxo["txid"], utxo["vout"])
             return False
 
         except Exception as e:
