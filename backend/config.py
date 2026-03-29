@@ -59,6 +59,9 @@ TAAL_API_KEY: str = os.getenv("TAAL_API_KEY", "")
 # GorillaPool Arcade (ARC-compatible); higher-throughput path vs legacy arc.gorillapool.io/v1/tx.
 # Override with GORILLA_ARC_URL if needed (e.g. rollback).
 GORILLA_ARC_URL: str = os.getenv("GORILLA_ARC_URL", "https://arcade.gorillapool.io/tx")
+# Gorilla payload format sent in `rawTx` for GorillaPool submissions.
+# `raw` = standard tx hex, `ef` = BIP-239 Transaction Extended Format, `auto` = EF when available, else raw.
+GORILLA_TX_FORMAT: str = os.getenv("GORILLA_TX_FORMAT", "raw").strip().lower()
 TAAL_ARC_URL: str = "https://arc.taal.com/v1/tx"
 WHATSONCHAIN_BASE_URL: str = "https://api.whatsonchain.com/v1/bsv"
 
@@ -217,6 +220,9 @@ def validate_config() -> list[str]:
     elif ARC_MAX_TIMEOUT_SECONDS > 30:
         errors.append("ARC_MAX_TIMEOUT_SECONDS must be <= 30")
 
+    if GORILLA_TX_FORMAT not in {"raw", "ef", "auto"}:
+        errors.append("GORILLA_TX_FORMAT must be one of: raw, ef, auto")
+
     for mt in AISSTREAM_FILTER_MESSAGE_TYPES:
         if mt not in SUPPORTED_AIS_POSITION_MESSAGE_TYPES:
             errors.append(
@@ -238,6 +244,7 @@ def get_config_summary() -> dict:
         "bsv_network": BSV_NETWORK,
         "taal_api_key": "***" if TAAL_API_KEY else "(not set)",
         "gorilla_arc_url": GORILLA_ARC_URL,
+        "gorilla_tx_format": GORILLA_TX_FORMAT,
         "database_url": DATABASE_URL[:30] + "..." if len(DATABASE_URL) > 30 else DATABASE_URL,
         "utxo_pool_target": UTXO_POOL_TARGET,
         "utxo_value_each": UTXO_VALUE_EACH,

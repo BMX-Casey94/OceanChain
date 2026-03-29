@@ -2,7 +2,12 @@
 
 ## Current OceanChain behaviour
 
-- OceanChain currently submits plain JSON `{"rawTx":"..."}` to ARC-compatible endpoints.
+- OceanChain submits JSON `{"rawTx":"..."}` to ARC-compatible endpoints.
+- Payload format can now be switched for GorillaPool with `GORILLA_TX_FORMAT`:
+  - `raw` (default): standard signed tx hex,
+  - `ef`: BIP-239 Transaction Extended Format (TEF) hex in `rawTx`,
+  - `auto`: prefer EF when context is available, else raw.
+- TAAL submissions remain standard raw tx hex for now.
 - The client polls `GET /tx/{txid}` and only counts success once ARC reaches `SEEN_ON_NETWORK` (or a later status).
 - Vessel broadcasts use many parallel `POST /tx` calls.
 - Fan-out refills use the same broadcaster path, but far less frequently.
@@ -32,7 +37,7 @@
 
 ### Raw tx vs EF / BEEF
 
-- OceanChain currently submits plain raw transactions, not EF / BEEF.
+- OceanChain can now submit EF for GorillaPool (`GORILLA_TX_FORMAT=ef|auto`), while retaining raw fallback behaviour.
 - For chained spends, unconfirmed parents, or validator setups that do not already know the parent transaction, raw-only submission may be insufficient.
 - That is currently the clearest explanation for:
   - GorillaPool `467`,
@@ -79,6 +84,7 @@
 - `UTXO_VALUE_EACH=3000` remains the safer baseline in this project unless you have confirmed a better production profile.
 - Keep `RESERVE_MIN_IMPORT_SAT` and Bitails `--min-sat` / `BITAILS_IMPORT_MIN_SAT` high enough to avoid importing 40-50 sat dust into `reserve`.
 - Treat `ARC_MAX_TIMEOUT_SECONDS=1` as a diagnostic setting, not a production default.
+- Enable Gorilla EF explicitly during validation runs: `GORILLA_TX_FORMAT=ef`.
 - Avoid giant refill fan-outs; larger reserve UTXOs are more important than a huge count of tiny ones.
 
 ## Immediate VPS recovery playbook
@@ -87,7 +93,7 @@
 
 ```bash
 cd /opt/OceanChain/backend
-grep -E '^(UTXO_POOL_TARGET|UTXO_VALUE_EACH|RESERVE_MIN_IMPORT_SAT|ARC_MAX_TIMEOUT_SECONDS|FANOUT_MAX_INPUTS|OCEANCHAIN_FUNDING_ADDRESS)=' .env
+grep -E '^(UTXO_POOL_TARGET|UTXO_VALUE_EACH|RESERVE_MIN_IMPORT_SAT|ARC_MAX_TIMEOUT_SECONDS|GORILLA_TX_FORMAT|FANOUT_MAX_INPUTS|OCEANCHAIN_FUNDING_ADDRESS)=' .env
 ```
 
 ### 2. Inspect the largest current wallet unspents from Bitails
@@ -123,4 +129,6 @@ journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-
 ## References
 
 - GorillaPool / Arcade operational notes shared during OceanChain debugging.
+- ARC API docs / OpenAPI: [bitcoin-sv.github.io/arc/api.html](https://bitcoin-sv.github.io/arc/api.html)
+- BIP-239 (Transaction Extended Format): [github.com/bitcoin-sv/arc/blob/main/doc/BIP-239.md](https://github.com/bitcoin-sv/arc/blob/main/doc/BIP-239.md)
 - Arcade project issue discussing current storage / infra limitations: [Feature: PostGres #30](https://github.com/bsv-blockchain/arcade/issues/30)

@@ -188,6 +188,96 @@ def calculate_fee(tx_size_bytes: int = ESTIMATED_TX_SIZE) -> int:
     return max(fee_sat, MIN_TX_FEE_SAT)
 
 
+_TEF_MARKER = bytes.fromhex("0000000000ef")
+
+
+def _encode_varint(value: int) -> bytes:
+    """Bitcoin varint encoding (little-endian for multi-byte variants)."""
+    if value < 0:
+        raise ValueError("Varint cannot encode negative values")
+    if value < 0xFD:
+        return bytes((value,))
+    if value <= 0xFFFF:
+        return b"\xfd" + struct.pack("<H", value)
+    if value <= 0xFFFFFFFF:
+        return b"\xfe" + struct.pack("<I", value)
+    if value <= 0xFFFFFFFFFFFFFFFF:
+        return b"\xff" + struct.pack("<Q", value)
+    raise ValueError("Varint value too large")
+
+
+def get_wallet_prevout_locking_script_hex() -> str:
+    """
+    P2PKH locking script hex for the configured wallet key.
+
+    OceanChain signs spends from this wallet script in both vessel txs and fan-out refills.
+    """
+    private_key = PrivateKey.from_WIF(BSV_PRIVATE_KEY_WIF)
+    return private_key.public_key.P2PKH_script().to_bytes().hex()
+
+
+def to_extended_format_hex(
+    raw_tx_hex: str,
+    prevouts: list[dict[str, Any]],
+) -> str:
+    """
+    Build BIP-239 Transaction Extended Format (TEF/EF) hex from signed raw tx hex.
+
+    ARC-compatible receivers still use the `rawTx` JSON field; this function changes the
+    hex payload format so each input includes satoshis and locking script context.
+    """
+    tx = Tx.from_hex(raw_tx_hex)
+    if len(prevouts) != len(tx.inputs):
+        raise ValueError(
+            f"prevouts length {len(prevouts)} does not match input count {len(tx.inputs)}"
+        )
+
+    out = bytearray()
+    out.extend(struct.pack("<i", int(tx.version)))
+    out.extend(_TEF_MARKER)
+    out.extend(_encode_varint(len(tx.inputs)))
+
+    for idx, tx_input in enumerate(tx.inputs):
+        prev = prevouts[idx]
+        value_sat = int(prev["value_sat"])
+        if value_sat < 0:
+            raise ValueError(f"prevout[{idx}] has negative value_sat")
+        script_hex = str(prev["locking_script_hex"]).strip().lower()
+        if script_hex.startswith("0x"):
+            script_hex = script_hex[2:]
+        if len(script_hex) % 2 != 0:
+            raise ValueError(f"prevout[{idx}] locking_script_hex has odd length")
+        try:
+            locking_script = bytes.fromhex(script_hex)
+        except ValueError as exc:
+            raise ValueError(f"prevout[{idx}] locking_script_hex is not valid hex") from exc
+
+        script_sig = tx_input.script_sig.to_bytes()
+
+        out.extend(tx_input.prev_hash)
+        out.extend(struct.pack("<I", int(tx_input.prev_idx)))
+        out.extend(_encode_varint(len(script_sig)))
+        out.extend(script_sig)
+        out.extend(struct.pack("<I", int(tx_input.sequence)))
+        # TEF encodes previous output value as uint64 little-endian.
+        out.extend(struct.pack("<Q", value_sat))
+        out.extend(_encode_varint(len(locking_script)))
+        out.extend(locking_script)
+
+    out.extend(_encode_varint(len(tx.outputs)))
+    for tx_output in tx.outputs:
+        script_pubkey = tx_output.script_pubkey.to_bytes()
+        value_sat = int(tx_output.value)
+        if value_sat < 0:
+            raise ValueError("Transaction output has negative value")
+        out.extend(struct.pack("<Q", value_sat))
+        out.extend(_encode_varint(len(script_pubkey)))
+        out.extend(script_pubkey)
+
+    out.extend(struct.pack("<I", int(tx.locktime)))
+    return bytes(out).hex()
+
+
 def minimum_viable_utxo_value() -> int:
     """
     Minimum input value required to create a standard tx that still leaves

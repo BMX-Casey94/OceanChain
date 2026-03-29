@@ -22,6 +22,7 @@ from config import (
     BATCH_INTERVAL_SECONDS,
     BROADCAST_CONCURRENCY,
     VPS_API_PORT,
+    GORILLA_TX_FORMAT,
     UTXO_AUTO_REFILL_ON_START,
     LOG_SUMMARY_INTERVAL_SECONDS,
     LOG_SAMPLE_RAW_TX_PATH,
@@ -32,8 +33,9 @@ from ais_client import ais_client
 from tx_builder import (
     build_op_return_tx,
     get_change_address,
-    calculate_fee,
+    get_wallet_prevout_locking_script_hex,
     canonical_txid_from_raw_hex,
+    to_extended_format_hex,
 )
 from utxo_manager import utxo_manager
 from broadcaster import submit, BroadcastError
@@ -65,6 +67,7 @@ async def process_vessel(
     mmsi: str,
     position: dict[str, Any],
     change_address: str,
+    gorilla_prevout_locking_script_hex: str,
 ) -> bool:
     """
     Process a single vessel position: acquire UTXO, build TX, submit, update pool.
@@ -74,6 +77,7 @@ async def process_vessel(
         mmsi: Vessel MMSI
         position: Position data dict
         change_address: Address for change output
+        gorilla_prevout_locking_script_hex: Wallet input script for EF payloads
         
     Returns:
         True if successful, False otherwise
@@ -95,12 +99,34 @@ async def process_vessel(
                 position=position,
                 change_address=change_address,
             )
+            gorilla_tx_hex: Optional[str] = None
+            if GORILLA_TX_FORMAT != "raw":
+                try:
+                    gorilla_tx_hex = to_extended_format_hex(
+                        raw_tx_hex,
+                        [
+                            {
+                                "value_sat": int(utxo["value_sat"]),
+                                "locking_script_hex": gorilla_prevout_locking_script_hex,
+                            }
+                        ],
+                    )
+                except Exception as ef_err:
+                    if GORILLA_TX_FORMAT == "ef":
+                        raise RuntimeError(
+                            f"Could not build EF payload for Gorilla submit: {ef_err}"
+                        ) from ef_err
+                    logger.warning(
+                        "Could not build EF payload for Gorilla (%s); continuing with raw for %s",
+                        ef_err,
+                        label,
+                    )
             
             # Calculate fee for stats
             fee_sat = utxo["value_sat"] - change_value
             
             # Submit transaction (store explorer-canonical txid; ARC may differ)
-            result = await submit(raw_tx_hex)
+            result = await submit(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
             txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
             txid_arc = result.get("txid")
             txid = txid_canon or (str(txid_arc).lower() if txid_arc else None)
@@ -190,6 +216,11 @@ async def broadcasting_loop() -> None:
     
     change_address = get_change_address()
     logger.info(f"Change address: {change_address}")
+    gorilla_prevout_locking_script_hex = get_wallet_prevout_locking_script_hex()
+    logger.info(
+        "Gorilla tx format mode: %s",
+        GORILLA_TX_FORMAT,
+    )
     
     while True:
         try:
@@ -234,7 +265,13 @@ async def broadcasting_loop() -> None:
             semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
             
             tasks = [
-                process_vessel(semaphore, mmsi, position, change_address)
+                process_vessel(
+                    semaphore,
+                    mmsi,
+                    position,
+                    change_address,
+                    gorilla_prevout_locking_script_hex,
+                )
                 for mmsi, position in snapshot.items()
             ]
             

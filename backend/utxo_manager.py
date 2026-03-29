@@ -18,6 +18,7 @@ from config import (
     UTXO_VALUE_EACH,
     BSV_PRIVATE_KEY_WIF,
     BSV_NETWORK,
+    GORILLA_TX_FORMAT,
     FANOUT_MAX_INPUTS,
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
@@ -542,7 +543,7 @@ class UTXOManager:
         Returns:
             Transaction ID of the fan-out TX, or None on failure
         """
-        from tx_builder import get_change_address, calculate_fee
+        from tx_builder import get_change_address, calculate_fee, to_extended_format_hex
         from broadcaster import submit, BroadcastError
         from bitcoinx import (
             PrivateKey,
@@ -646,11 +647,34 @@ class UTXOManager:
                 tx.inputs[idx].script_sig = Script(script_sig)
 
             raw_tx_hex = tx.to_bytes().hex()
+            gorilla_tx_hex: Optional[str] = None
+            if GORILLA_TX_FORMAT != "raw":
+                prev_locking_script_hex = prev_output_script.to_bytes().hex()
+                prevouts = [
+                    {
+                        "value_sat": int(u["value_sat"]),
+                        "locking_script_hex": prev_locking_script_hex,
+                    }
+                    for u in funding_utxos
+                ]
+                try:
+                    gorilla_tx_hex = to_extended_format_hex(raw_tx_hex, prevouts)
+                except Exception as ef_err:
+                    if GORILLA_TX_FORMAT == "ef":
+                        self._last_refill_error = (
+                            f"Could not build EF payload for Gorilla fan-out submit: {ef_err}"
+                        )
+                        logger.error(self._last_refill_error)
+                        return None
+                    logger.warning(
+                        "Could not build EF payload for Gorilla fan-out (%s); continuing with raw",
+                        ef_err,
+                    )
             txid_canon = tx.hex_hash()
             if txid_canon:
                 txid_canon = txid_canon.lower()
             try:
-                broadcast = await submit(raw_tx_hex)
+                broadcast = await submit(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
             except BroadcastError as e:
                 self._last_refill_error = (
                     f"Fan-out broadcast failed (all ARC endpoints): {e} | "
