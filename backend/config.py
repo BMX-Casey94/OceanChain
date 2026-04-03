@@ -92,6 +92,12 @@ FANOUT_MAX_INPUTS: int = int(os.getenv("FANOUT_MAX_INPUTS", "512"))
 # When > 0, WhatsOnChain sync and admin bulk reserve import skip UTXOs below this value (reduces dust rows).
 RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
+# Database pool sizing — controls how many Postgres backend processes run concurrently.
+# At high BROADCAST_CONCURRENCY every pool slot runs constant UPDATE/DELETE/INSERT cycles;
+# 20 slots on a 4-core VPS can saturate CPU.  3-5 is typically plenty for UTXO operations.
+DB_POOL_MIN_SIZE: int = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
+DB_POOL_MAX_SIZE: int = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
+
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
 # Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
@@ -190,6 +196,13 @@ def validate_config() -> list[str]:
     if RESERVE_MIN_IMPORT_SAT < 0:
         errors.append("RESERVE_MIN_IMPORT_SAT must be >= 0")
 
+    if DB_POOL_MIN_SIZE < 1:
+        errors.append("DB_POOL_MIN_SIZE must be >= 1")
+    if DB_POOL_MAX_SIZE < DB_POOL_MIN_SIZE:
+        errors.append("DB_POOL_MAX_SIZE must be >= DB_POOL_MIN_SIZE")
+    if DB_POOL_MAX_SIZE > 50:
+        errors.append("DB_POOL_MAX_SIZE must be <= 50")
+
     if BROADCAST_CONCURRENCY < 1:
         errors.append("BROADCAST_CONCURRENCY must be >= 1")
     elif BROADCAST_CONCURRENCY > 512:
@@ -252,6 +265,8 @@ def get_config_summary() -> dict:
         "refill_failure_cooldown_seconds": REFILL_FAILURE_COOLDOWN_SECONDS,
         "fanout_max_inputs": FANOUT_MAX_INPUTS,
         "min_change_output_sat": MIN_CHANGE_OUTPUT_SAT,
+        "db_pool_min_size": DB_POOL_MIN_SIZE,
+        "db_pool_max_size": DB_POOL_MAX_SIZE,
         "batch_interval_seconds": BATCH_INTERVAL_SECONDS,
         "broadcast_concurrency": BROADCAST_CONCURRENCY,
         "arc_wait_for_status": ARC_WAIT_FOR_STATUS,

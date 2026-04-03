@@ -363,10 +363,11 @@ async def init_database() -> asyncpg.Pool:
     """
     logger.info("Connecting to database...")
     
+    from config import DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE
     pool = await asyncpg.create_pool(
         DATABASE_URL,
-        min_size=5,
-        max_size=20,
+        min_size=DB_POOL_MIN_SIZE,
+        max_size=DB_POOL_MAX_SIZE,
         command_timeout=60,
     )
     
