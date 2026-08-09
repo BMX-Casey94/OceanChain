@@ -1,6 +1,6 @@
 # AIS message expansion — phased plan & reference
 
-This document is the **single reference** for extending OceanChain beyond **`PositionReport`** only. Use it to add capabilities **one phase at a time**, measure impact, and avoid jumping straight to unsustainable on-chain throughput (and cost).
+This document is the **single reference** for extending Ocechain beyond **`PositionReport`** only. Use it to add capabilities **one phase at a time**, measure impact, and avoid jumping straight to unsustainable on-chain throughput (and cost).
 
 **Official AISStream reference:** [AIS Stream API Reference](https://aisstream.io/documentation)  
 **Message models (OpenAPI / languages):** [aisstream/ais-message-models](https://github.com/aisstream/ais-message-models)

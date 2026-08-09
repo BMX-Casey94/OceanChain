@@ -1,5 +1,5 @@
 """
-OceanChain Main Orchestrator
+Ocechain Main Orchestrator
 
 Runs all services concurrently:
 - AIS WebSocket client (vessel position ingestion)
@@ -48,6 +48,7 @@ from api_server import (
     update_vessel_count,
     broadcast_tx_event,
 )
+from vessel_api import set_vessel_snapshot_provider
 
 # Configure logging
 logging.basicConfig(
@@ -411,7 +412,8 @@ async def main() -> None:
             logger.error(f"  - {error}")
         sys.exit(1)
     
-    logger.info("OceanChain starting...")
+    set_vessel_snapshot_provider(ais_client.get_current_snapshot)
+    logger.info("Ocechain starting...")
     logger.info(f"Config: {get_config_summary()}")
     
     # Initialize database

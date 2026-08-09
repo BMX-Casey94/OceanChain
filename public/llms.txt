@@ -1,0 +1,40 @@
+# Ocechain
+
+> Ocechain is maritime intelligence on Bitcoin: live AIS vessel positions permanently recorded as publicly verifiable ledger entries for insurance, logistics, compliance, and operators.
+
+Ocechain turns ephemeral ship movements into an immutable evidence layer. It is not a navigational aid.
+
+## Key pages
+
+- [Home](https://ocechain.com/): Product overview — how AIS positions become permanent Bitcoin records
+- [Live fleet map](https://ocechain.com/live): Search ships (name, MMSI, call sign) and locations (ports, places, coordinates); open vessel panels and explorer links
+- [FAQ](https://ocechain.com/faq): Canonical answers on insurance use, on-chain records, data sources, and disclaimers
+- [Full description](https://ocechain.com/llms-full.txt): Longer product, audience, and technical summary for models that need more context
+
+## What Ocechain is
+
+Ocechain ingests real-time global AIS vessel data and records compact position payloads on Bitcoin. The product is an evidence layer for marine insurance, logistics, compliance, operators, counsel, researchers, and journalists.
+
+## What Ocechain is not
+
+Ocechain is not a navigational aid and must not be used for collision avoidance or voyage planning.
+
+## Differentiators
+
+- Permanent Bitcoin records of vessel positions
+- Public verification via blockchain explorers
+- Live map with ship and location search
+- Shareable deep links to vessels and regions (`/live?mmsi=`, `/live?q=`, `/live?lat=&lon=&z=`)
+
+## Protocol note
+
+User-facing brand: Ocechain. On-chain OP_RETURN prefix: `Ocechain`. Marketing language refers to Bitcoin (not BSV).
+
+## Optional
+
+- [Sitemap](https://ocechain.com/sitemap.xml): Indexable HTML routes
+- [Robots](https://ocechain.com/robots.txt): Crawler permissions (search and AI answer bots allowed)
+
+## Contact
+
+Enterprise / insurance enquiries: enterprise@ocechain.com

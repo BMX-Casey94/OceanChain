@@ -1,35 +1,82 @@
 """
-OceanChain API Server Module
+Ocechain API Server Module
 
-FastAPI server providing health checks, stats endpoints, and WebSocket
-broadcasting for real-time transaction updates.
+FastAPI server providing health checks, stats endpoints, vessel queries,
+and WebSocket broadcasting for real-time transaction updates.
 """
 
 import asyncio
 import logging
 import secrets
 import time
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from config import OCEANCHAIN_ADMIN_API_KEY, VPS_API_PORT, UVICORN_ACCESS_LOG
+from config import (
+    CORS_ALLOW_ORIGINS,
+    OCEANCHAIN_ADMIN_API_KEY,
+    UVICORN_ACCESS_LOG,
+    VESSEL_SEARCH_RATE_LIMIT,
+    VESSEL_SEARCH_RATE_WINDOW_SECONDS,
+    VESSELS_LIST_DEFAULT_LIMIT,
+    VESSELS_LIST_MAX_LIMIT,
+    VPS_API_PORT,
+)
 from utxo_manager import utxo_manager
+from vessel_api import get_snapshot, get_vessel, list_vessels, record_vessel_tx, search_vessels
 
 logger = logging.getLogger(__name__)
 
 # Application state
 app = FastAPI(
-    title="OceanChain API",
-    description="Real-time maritime vessel tracking on BSV blockchain",
+    title="Ocechain API",
+    description="Real-time maritime vessel tracking recorded on Bitcoin",
     version="1.0.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Simple in-memory rate limiter for public search
+_search_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _rate_limit_search(request: Request) -> Optional[JSONResponse]:
+    ip = _client_ip(request)
+    now = time.time()
+    window = float(VESSEL_SEARCH_RATE_WINDOW_SECONDS)
+    hits = _search_hits[ip]
+    while hits and now - hits[0] > window:
+        hits.popleft()
+    if len(hits) >= VESSEL_SEARCH_RATE_LIMIT:
+        return JSONResponse(
+            {"status": "error", "message": "Rate limit exceeded. Try again shortly."},
+            status_code=429,
+        )
+    hits.append(now)
+    return None
 
 # Shared state
 class AppState:
@@ -126,6 +173,23 @@ async def health_check() -> JSONResponse:
         reserve_metrics = {"reserve_count": -1, "reserve_total_sat": -1}
 
     uptime_seconds = time.time() - state.start_time
+    snapshot = get_snapshot()
+
+    ais_status: dict[str, Any] = {
+        "connected": False,
+        "vessels": len(snapshot),
+        "messages": 0,
+        "rate_limited": False,
+        "rate_limited_for_seconds": 0,
+        "last_error": None,
+    }
+    try:
+        from ais_client import ais_client
+
+        ais_status = ais_client.get_status()
+        ais_status["vessels"] = len(snapshot)
+    except Exception:
+        pass
 
     return JSONResponse({
         "status": "ok",
@@ -136,6 +200,12 @@ async def health_check() -> JSONResponse:
         "reserve_total_sat": reserve_metrics["reserve_total_sat"],
         "paused": state.paused,
         "uptime_seconds": round(uptime_seconds, 1),
+        "ais_vessels": ais_status.get("vessels", len(snapshot)),
+        "ais_connected": ais_status.get("connected"),
+        "ais_messages": ais_status.get("messages"),
+        "ais_rate_limited": ais_status.get("rate_limited"),
+        "ais_rate_limited_for_seconds": ais_status.get("rate_limited_for_seconds"),
+        "ais_last_error": ais_status.get("last_error"),
     })
 
 
@@ -144,9 +214,92 @@ async def stats_summary() -> JSONResponse:
     """
     Get current aggregate statistics.
     
-    Returns transaction counts, vessel count, BSV spent, avg fee, uptime.
+    Returns transaction counts, vessel count, sats spent, avg fee, uptime.
     """
     return JSONResponse(get_stats_snapshot())
+
+
+def _parse_bbox(raw: str) -> Optional[tuple[float, float, float, float]]:
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 4:
+        return None
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(p) for p in parts)
+    except ValueError:
+        return None
+    if min_lon > max_lon or min_lat > max_lat:
+        return None
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
+def _parse_near(raw: str) -> Optional[tuple[float, float]]:
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 2:
+        return None
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return (lat, lon)
+
+
+@app.get("/vessels")
+async def vessels_list(
+    bbox: Optional[str] = Query(
+        None, description="minLon,minLat,maxLon,maxLat"
+    ),
+    near: Optional[str] = Query(None, description="lat,lon"),
+    radius_nm: float = Query(50.0, ge=0.1, le=2000.0),
+    limit: int = Query(VESSELS_LIST_DEFAULT_LIMIT, ge=1, le=VESSELS_LIST_MAX_LIMIT),
+) -> JSONResponse:
+    """Return a compact list of vessels from the live AIS snapshot."""
+    parsed_bbox = _parse_bbox(bbox) if bbox else None
+    if bbox and parsed_bbox is None:
+        return JSONResponse(
+            {"status": "error", "message": "Invalid bbox. Use minLon,minLat,maxLon,maxLat"},
+            status_code=400,
+        )
+    parsed_near = _parse_near(near) if near else None
+    if near and parsed_near is None:
+        return JSONResponse(
+            {"status": "error", "message": "Invalid near. Use lat,lon"},
+            status_code=400,
+        )
+    vessels = list_vessels(
+        bbox=parsed_bbox,
+        near=parsed_near,
+        radius_nm=radius_nm,
+        limit=limit,
+    )
+    return JSONResponse({"count": len(vessels), "vessels": vessels})
+
+
+@app.get("/vessels/search")
+async def vessels_search(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=64),
+    limit: int = Query(12, ge=1, le=50),
+) -> JSONResponse:
+    """Search vessels by MMSI, name, call sign, or IMO."""
+    limited = _rate_limit_search(request)
+    if limited is not None:
+        return limited
+    results = search_vessels(q, limit=limit)
+    return JSONResponse({"query": q.strip(), "count": len(results), "results": results})
+
+
+@app.get("/vessels/{mmsi}")
+async def vessels_detail(mmsi: str) -> JSONResponse:
+    """Return a single vessel by MMSI."""
+    vessel = get_vessel(mmsi.strip())
+    if vessel is None:
+        return JSONResponse(
+            {"status": "error", "message": "Vessel not found"},
+            status_code=404,
+        )
+    return JSONResponse(vessel)
 
 
 @app.get("/stats/timeseries")
@@ -475,6 +628,8 @@ async def broadcast_tx_event(tx_event: dict[str, Any]) -> None:
     Args:
         tx_event: Dict with txid, mmsi, vessel_name, lat, lon, speed, heading, timestamp, fee_sat, broadcaster
     """
+    record_vessel_tx(tx_event)
+
     if not state.ws_connections:
         return
     

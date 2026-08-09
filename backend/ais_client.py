@@ -1,5 +1,5 @@
 """
-OceanChain AIS Client Module
+Ocechain AIS Client Module
 
 Persistent async WebSocket client that connects to AISstream.io
 and maintains a live snapshot of vessel positions.
@@ -8,6 +8,7 @@ and maintains a live snapshot of vessel positions.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -91,10 +92,19 @@ def _metadata_strings(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _message_metadata(message: dict[str, Any]) -> dict[str, Any]:
+    """AISstream uses MetaData; accept Metadata as a defensive alias."""
+    meta = message.get("MetaData")
+    if isinstance(meta, dict):
+        return meta
+    meta = message.get("Metadata")
+    return meta if isinstance(meta, dict) else {}
+
+
 def _parse_position_report(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     """AIS MessageType PositionReport → unified position dict."""
     try:
-        metadata = message.get("Metadata") or {}
+        metadata = _message_metadata(message)
         position_report = message.get("Message", {}).get("PositionReport", {})
         if not position_report:
             return None
@@ -119,7 +129,7 @@ def _parse_position_report(message: dict[str, Any]) -> Optional[dict[str, Any]]:
 def _parse_standard_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     """AIS Class B standard position (message 18-style JSON)."""
     try:
-        metadata = message.get("Metadata") or {}
+        metadata = _message_metadata(message)
         body = message.get("Message", {}).get("StandardClassBPositionReport")
         if not body:
             return None
@@ -144,7 +154,7 @@ def _parse_standard_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]
 def _parse_extended_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     """AIS extended Class B position; may carry Name / Type in body."""
     try:
-        metadata = message.get("Metadata") or {}
+        metadata = _message_metadata(message)
         body = message.get("Message", {}).get("ExtendedClassBPositionReport")
         if not body:
             return None
@@ -179,7 +189,7 @@ def _parse_extended_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]
 def _parse_long_range(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     """AIS long-range broadcast (coarser position)."""
     try:
-        metadata = message.get("Metadata") or {}
+        metadata = _message_metadata(message)
         body = message.get("Message", {}).get("LongRangeAisBroadcastMessage")
         if not body:
             return None
@@ -243,6 +253,9 @@ class AISClient:
         self._reconnect_delay: float = 5.0
         self._message_count: int = 0
         self._last_message_time: Optional[datetime] = None
+        self._last_error: Optional[str] = None
+        self._rate_limited_until: float = 0.0
+        self._rate_limit_hits: int = 0
 
     def get_current_snapshot(self) -> dict[str, dict[str, Any]]:
         """Shallow copy of MMSI → position data (values may still be mutated — treat as read-only)."""
@@ -256,6 +269,29 @@ class AISClient:
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def get_status(self) -> dict[str, Any]:
+        now = time.monotonic()
+        rate_limited = now < self._rate_limited_until
+        return {
+            "connected": self._connected,
+            "vessels": len(self._snapshot),
+            "messages": self._message_count,
+            "rate_limited": rate_limited,
+            "rate_limited_for_seconds": (
+                max(0, int(self._rate_limited_until - now)) if rate_limited else 0
+            ),
+            "last_error": self._last_error,
+        }
+
+    def _mark_rate_limited(self, reason: str) -> float:
+        self._rate_limit_hits += 1
+        # Exponential backoff: 3m, 6m, 12m… capped at 30m. Connection attempts
+        # (not message volume) are what AISstream throttles on the free tier.
+        backoff = min(1800.0, 180.0 * (2 ** min(self._rate_limit_hits - 1, 4)))
+        self._rate_limited_until = time.monotonic() + backoff
+        self._last_error = reason
+        return backoff
 
     def _merge_into_snapshot(self, position: dict[str, Any], message_type: str) -> None:
         """
@@ -282,9 +318,17 @@ class AISClient:
     async def _handle_message(self, raw_message: str) -> None:
         try:
             message = json.loads(raw_message)
+
+            # AISstream auth / subscription failures arrive as plain error objects
+            if isinstance(message, dict) and "error" in message and "MessageType" not in message:
+                logger.error("AISstream error: %s", message.get("error"))
+                return
+
             message_type = message.get("MessageType", "")
 
             if message_type not in AISSTREAM_FILTER_MESSAGE_TYPES:
+                if message_type and self._message_count == 0:
+                    logger.info("Ignoring AIS message type %s (not in filter)", message_type)
                 return
 
             position = parse_ais_position_message(message)
@@ -295,7 +339,12 @@ class AISClient:
             self._message_count += 1
             self._last_message_time = datetime.utcnow()
 
-            if self._message_count % 50000 == 0:
+            if self._message_count == 1:
+                logger.info(
+                    "First AIS position received (MMSI %s) — snapshot live",
+                    position.get("mmsi"),
+                )
+            elif self._message_count % 50000 == 0:
                 logger.debug(
                     "AIS processed %s messages, %s vessels in snapshot",
                     self._message_count,
@@ -308,33 +357,41 @@ class AISClient:
     async def _connect_and_subscribe(self) -> websockets.WebSocketClientProtocol:
         logger.info("Connecting to AISstream at %s", AISSTREAM_WS_URL)
 
+        # AISstream can stay quiet for several seconds after subscribe; keep ping
+        # generous so a busy/slow feed is not mistaken for a dead socket.
         websocket = await websockets.connect(
             AISSTREAM_WS_URL,
-            ping_interval=30,
-            ping_timeout=10,
+            ping_interval=20,
+            ping_timeout=60,
             close_timeout=10,
+            max_queue=1024,
         )
 
         subscription = {
-            "APIKey": AISSTREAM_API_KEY,
+            "APIKey": AISSTREAM_API_KEY.strip(),
             "BoundingBoxes": [[[-90, -180], [90, 180]]],
             "FilterMessageTypes": list(AISSTREAM_FILTER_MESSAGE_TYPES),
         }
 
         await websocket.send(json.dumps(subscription))
         logger.info(
-            "AISstream subscription sent (FilterMessageTypes=%s)",
+            "AISstream subscription sent (FilterMessageTypes=%s, key_len=%s)",
             AISSTREAM_FILTER_MESSAGE_TYPES,
+            len(AISSTREAM_API_KEY.strip()),
         )
 
         self._connected = True
+        self._last_error = None
+        self._rate_limit_hits = 0
+        self._rate_limited_until = 0.0
         return websocket
 
     async def run(self) -> None:
         """
         Connect, subscribe, and process messages until cancelled.
 
-        Reconnects with a fixed backoff on errors.
+        Reconnects with backoff on errors. Free-tier AISstream throttles
+        *connection attempts* (HTTP 429), not messages on an open socket.
         """
         while True:
             try:
@@ -346,10 +403,21 @@ class AISClient:
             except ConnectionClosed as e:
                 logger.warning("WebSocket connection closed: %s", e)
                 self._connected = False
+                self._last_error = f"connection closed: {e}"
 
             except WebSocketException as e:
                 logger.error("WebSocket error: %s", e)
                 self._connected = False
+                if "429" in str(e):
+                    backoff = self._mark_rate_limited(str(e))
+                    logger.warning(
+                        "AISstream rate-limited (HTTP 429). Backing off %.0fs before retry. "
+                        "Avoid opening multiple clients with the same key.",
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                self._last_error = str(e)
 
             except asyncio.CancelledError:
                 logger.info("AIS client shutdown requested")
@@ -359,6 +427,15 @@ class AISClient:
             except Exception as e:
                 logger.error("Unexpected error in AIS client: %s", e, exc_info=True)
                 self._connected = False
+                if "429" in str(e):
+                    backoff = self._mark_rate_limited(str(e))
+                    logger.warning(
+                        "AISstream rate-limited (HTTP 429). Backing off %.0fs before retry.",
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                self._last_error = str(e)
 
             logger.info("Reconnecting in %s seconds...", self._reconnect_delay)
             await asyncio.sleep(self._reconnect_delay)

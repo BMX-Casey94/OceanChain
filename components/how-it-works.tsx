@@ -1,72 +1,66 @@
 "use client"
 
-import { Radio, Binary, ShieldCheck } from "lucide-react"
+import { ParallaxBackdrop, Reveal } from "@/components/parallax"
+import { ChainBlockIcon, ContainerShipIcon, RadarIcon } from "@/components/icons/marine"
 
 const steps = [
   {
     number: "01",
-    icon: Radio,
-    title: "AIS Ingestion",
-    description: "AISstream.io streams real-time vessel positions via WebSocket from 300,000+ active ships globally. Our engine maintains a live snapshot, updated continuously, capturing MMSI, coordinates, speed, and heading.",
+    Icon: RadarIcon,
+    title: "AIS ingestion",
+    description:
+      "Global AIS streams feed a live vessel snapshot — MMSI, coordinates, speed, heading, and voyage metadata updated continuously as ships move.",
   },
   {
     number: "02",
-    icon: Binary,
-    title: "TX Construction",
-    description: "Each vessel position is encoded into a compact 20-byte payload and embedded in a BSV OP_RETURN output. The fee is ceil(tx size / 1000 × your sat/KB rate); the builder measures the signed transaction so the fee matches the real payload and scripts, not a rough estimate.",
+    Icon: ContainerShipIcon,
+    title: "Compact recording",
+    description:
+      "Each position is encoded into a compact payload and written into a Bitcoin transaction. Small records keep permanence affordable at fleet scale.",
   },
   {
     number: "03",
-    icon: ShieldCheck,
-    title: "Broadcast & Mine",
-    description: "Transactions are submitted to GorillaPool Arcade with automatic TAAL fallback. Once mined, the position record is permanently written to the BSV blockchain — immutable, tamper-proof, and publicly verifiable by anyone.",
+    Icon: ChainBlockIcon,
+    title: "Permanent on Bitcoin",
+    description:
+      "Once mined, the record is immutable and publicly verifiable. Anyone can inspect the trail — without trusting a single proprietary database.",
   },
 ]
 
 export function HowItWorks() {
   return (
-    <section id="how-it-works" className="py-24 px-4">
-      <div className="max-w-6xl mx-auto">
-        {/* Section Header */}
-        <div className="text-center mb-16">
-          <h2 className="font-heading text-5xl md:text-6xl text-white">
-            How It Works
+    <section id="how-it-works" className="relative py-32 px-4 scroll-mt-24">
+      <ParallaxBackdrop className="section-veil opacity-70" distance={140} />
+
+      <div className="max-w-6xl mx-auto relative">
+        <Reveal className="max-w-2xl mb-20">
+          <p className="eyebrow mb-4">Signal to permanence</p>
+          <h2 className="font-display text-5xl md:text-6xl text-white leading-[1.02]">
+            How it works
           </h2>
-          <p className="mt-4 text-muted-foreground font-sans text-lg">
-            Three steps. Millions of records. Zero trust required.
+          <div className="rule-hairline mt-6 mb-6 w-40" />
+          <p className="text-white/65 font-sans text-lg leading-relaxed">
+            From the bridge of a ship to a permanent Bitcoin record — built for evidence,
+            not guesswork.
           </p>
-        </div>
+        </Reveal>
 
-        {/* Cards Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {steps.map((step) => (
-            <div
-              key={step.number}
-              className="glass-card card-hover relative overflow-hidden p-8"
-            >
-              {/* Background Step Number */}
-              <span 
-                className="font-heading text-7xl text-white/[0.06] absolute top-4 right-6 select-none pointer-events-none"
-                aria-hidden="true"
-              >
-                {step.number}
-              </span>
-
-              {/* Icon */}
-              <div className="inner-panel rounded-lg p-2 w-fit mb-6">
-                <step.icon className="text-teal-400" size={28} aria-hidden="true" />
-              </div>
-
-              {/* Title */}
-              <h3 className="font-heading text-2xl text-white mb-4">
-                {step.title}
-              </h3>
-
-              {/* Description */}
-              <p className="text-sm text-muted-foreground font-sans leading-relaxed">
-                {step.description}
-              </p>
-            </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
+          {steps.map((step, i) => (
+            <Reveal key={step.number} delay={i * 0.1}>
+              <article className="group">
+                <div className="mb-6 transition-transform duration-700 group-hover:-translate-y-1.5">
+                  <step.Icon size={80} />
+                </div>
+                <p className="data-label mb-3">Step {step.number}</p>
+                <h3 className="font-heading text-2xl tracking-wide text-white mb-3">
+                  {step.title}
+                </h3>
+                <p className="text-sm text-white/65 font-sans leading-relaxed">
+                  {step.description}
+                </p>
+              </article>
+            </Reveal>
           ))}
         </div>
       </div>

@@ -1,8 +1,8 @@
 # Arcade and Teranode Notes
 
-## Current OceanChain behaviour
+## Current Ocechain behaviour
 
-- OceanChain submits JSON `{"rawTx":"..."}` to ARC-compatible endpoints.
+- Ocechain submits JSON `{"rawTx":"..."}` to ARC-compatible endpoints.
 - Payload format can now be switched for GorillaPool with `GORILLA_TX_FORMAT`:
   - `raw` (default): standard signed tx hex,
   - `ef`: BIP-239 Transaction Extended Format (TEF) hex in `rawTx`,
@@ -37,7 +37,7 @@
 
 ### Raw tx vs EF / BEEF
 
-- OceanChain can now submit EF for GorillaPool (`GORILLA_TX_FORMAT=ef|auto`), while retaining raw fallback behaviour.
+- Ocechain can now submit EF for GorillaPool (`GORILLA_TX_FORMAT=ef|auto`), while retaining raw fallback behaviour.
 - For chained spends, unconfirmed parents, or validator setups that do not already know the parent transaction, raw-only submission may be insufficient.
 - That is currently the clearest explanation for:
   - GorillaPool `467`,
@@ -78,7 +78,7 @@
 
 ## `POST /tx` vs `POST /txs`
 
-- `POST /txs` is **not** currently a throughput fix for OceanChain.
+- `POST /txs` is **not** currently a throughput fix for Ocechain.
 - Based on the Arcade notes shared during debugging:
   - `/txs` still validates and writes each transaction individually,
   - transactions are processed sequentially inside the batch,
@@ -86,7 +86,7 @@
   - a shared timeout can starve later transactions.
 - For the current Arcade implementation, parallel `POST /tx` calls remain the better fit for high-throughput broadcasting.
 
-## Why OceanChain "suddenly stops"
+## Why Ocechain "suddenly stops"
 
 ### Dust exhaustion
 
@@ -124,14 +124,14 @@
 ### 1. Confirm the current operating envelope
 
 ```bash
-cd /opt/OceanChain/backend
+cd /opt/oceanchain/backend
 grep -E '^(UTXO_POOL_TARGET|UTXO_VALUE_EACH|RESERVE_MIN_IMPORT_SAT|ARC_MAX_TIMEOUT_SECONDS|GORILLA_TX_FORMAT|FANOUT_MAX_INPUTS|OCEANCHAIN_FUNDING_ADDRESS)=' .env
 ```
 
 ### 2. Inspect the largest current wallet unspents from Bitails
 
 ```bash
-cd /opt/OceanChain/backend
+cd /opt/oceanchain/backend
 set -a && source .env && set +a
 python scripts/list_largest_bitails_unspents.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --top 30 --min-sat 1000
 ```
@@ -139,7 +139,7 @@ python scripts/list_largest_bitails_unspents.py --address "$OCEANCHAIN_FUNDING_A
 ### 3. Import only usable reserve UTXOs
 
 ```bash
-cd /opt/OceanChain/backend
+cd /opt/oceanchain/backend
 set -a && source .env && set +a
 python scripts/import_reserves_bitails.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --min-sat 1000
 ```
@@ -160,7 +160,7 @@ journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-
 
 ## References
 
-- GorillaPool / Arcade operational notes shared during OceanChain debugging.
+- GorillaPool / Arcade operational notes shared during Ocechain debugging.
 - ARC API docs / OpenAPI: [bitcoin-sv.github.io/arc/api.html](https://bitcoin-sv.github.io/arc/api.html)
 - BIP-239 (Transaction Extended Format): [github.com/bitcoin-sv/arc/blob/main/doc/BIP-239.md](https://github.com/bitcoin-sv/arc/blob/main/doc/BIP-239.md)
 - Arcade project issue discussing current storage / infra limitations: [Feature: PostGres #30](https://github.com/bsv-blockchain/arcade/issues/30)

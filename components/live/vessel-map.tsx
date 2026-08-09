@@ -1,0 +1,384 @@
+"use client"
+
+import { useEffect, useRef, useState } from "react"
+import {
+  Map as MapLibreMap,
+  NavigationControl,
+  type GeoJSONSource,
+} from "maplibre-gl"
+import type { VesselSummary } from "@/lib/api"
+
+const STYLE_URL = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+
+type VesselMapProps = {
+  vessels: VesselSummary[]
+  selectedMmsi: string | null
+  onSelect: (mmsi: string) => void
+  flyTo?: { lon: number; lat: number; zoom?: number; key: number } | null
+  pulseMmsi?: string | null
+  onAvailabilityChange?: (available: boolean) => void
+}
+
+type WebGLStatus = "ok" | "webgl1-only" | "none"
+
+type WebGLDiagnostics = {
+  status: WebGLStatus
+  /** Driver-supplied reason, when the browser provides one. */
+  reason: string | null
+  renderer: string | null
+}
+
+/**
+ * `webglcontextcreationerror` carries the only reliable reason a context was
+ * refused (driver blocklist, acceleration disabled, out of contexts).
+ */
+function probeContext(
+  canvas: HTMLCanvasElement,
+  kind: "webgl2" | "webgl"
+): { context: RenderingContext | null; reason: string | null } {
+  let reason: string | null = null
+  const onError = (event: Event) => {
+    const message = (event as WebGLContextEvent).statusMessage
+    if (message) reason = message
+  }
+  canvas.addEventListener("webglcontextcreationerror", onError)
+  let context: RenderingContext | null = null
+  try {
+    context = canvas.getContext(kind)
+  } catch {
+    context = null
+  }
+  canvas.removeEventListener("webglcontextcreationerror", onError)
+  return { context, reason }
+}
+
+function readRenderer(context: RenderingContext | null): string | null {
+  const gl = context as WebGLRenderingContext | null
+  if (!gl || typeof gl.getExtension !== "function") return null
+  try {
+    const info = gl.getExtension("WEBGL_debug_renderer_info")
+    if (!info) return null
+    const value = gl.getParameter(info.UNMASKED_RENDERER_WEBGL)
+    return typeof value === "string" ? value : null
+  } catch {
+    return null
+  }
+}
+
+function diagnoseWebGL(): WebGLDiagnostics {
+  try {
+    const canvas = document.createElement("canvas")
+    const gl2 = probeContext(canvas, "webgl2")
+    if (gl2.context) {
+      return { status: "ok", reason: null, renderer: readRenderer(gl2.context) }
+    }
+    const gl1 = probeContext(document.createElement("canvas"), "webgl")
+    if (gl1.context) {
+      return {
+        status: "webgl1-only",
+        reason: gl2.reason,
+        renderer: readRenderer(gl1.context),
+      }
+    }
+    return { status: "none", reason: gl1.reason ?? gl2.reason, renderer: null }
+  } catch {
+    return { status: "none", reason: null, renderer: null }
+  }
+}
+
+function webglHelp(status: Exclude<WebGLStatus, "ok">, reason: string | null): string {
+  const gpuDisabled =
+    !!reason &&
+    (/GL_VENDOR\s*=\s*Disabled/i.test(reason) || /Sandboxed\s*=\s*yes/i.test(reason))
+  const bindFailed = !!reason && /BindToCurrentSequence failed/i.test(reason)
+
+  if (gpuDisabled || bindFailed) {
+    return (
+      "Opera’s GPU process is not giving this page a WebGL context " +
+      "(GL_VENDOR=Disabled / Sandboxed — this can happen even when “Use graphics acceleration” is already on). " +
+      "Open opera://gpu and check whether WebGL/WebGL2 are Hardware accelerated or Disabled. " +
+      "Then: fully quit Opera (tray icon too) and reopen; in opera://flags set any WebGL-related flags to Default; " +
+      "update your GPU driver; try Chrome/Edge as a control. MapLibre needs a real GPU WebGL2 context."
+    )
+  }
+  if (status === "webgl1-only") {
+    return (
+      "This browser provides WebGL 1 but not WebGL 2, which the chart requires. " +
+      "Check opera://gpu — WebGL2 must be Hardware accelerated."
+    )
+  }
+  return (
+    "This browser refused to create any WebGL context, so the chart cannot render. " +
+    "Check opera://gpu for the block reason, or try Chrome/Edge with hardware acceleration on."
+  )
+}
+
+function toFeatureCollection(vessels: VesselSummary[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: vessels.map((v) => ({
+      type: "Feature",
+      properties: {
+        mmsi: v.mmsi,
+        name: v.name || v.mmsi,
+        heading: v.heading ?? 0,
+        speed: v.speed,
+        selected: 0,
+      },
+      geometry: {
+        type: "Point",
+        coordinates: [v.lon, v.lat],
+      },
+    })),
+  }
+}
+
+function safeRemoveMap(map: MapLibreMap | null) {
+  if (!map) return
+  try {
+    map.remove()
+  } catch {
+    // MapLibre can throw if WebGL/context failed mid-init
+  }
+}
+
+export function VesselMap({
+  vessels,
+  selectedMmsi,
+  onSelect,
+  flyTo,
+  pulseMmsi,
+  onAvailabilityChange,
+}: VesselMapProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const mapRef = useRef<MapLibreMap | null>(null)
+  const onSelectRef = useRef(onSelect)
+  const [mapError, setMapError] = useState<string | null>(null)
+  const [diagnostics, setDiagnostics] = useState<WebGLDiagnostics | null>(null)
+  onSelectRef.current = onSelect
+
+  useEffect(() => {
+    onAvailabilityChange?.(!mapError)
+  }, [mapError, onAvailabilityChange])
+
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return
+
+    const webgl = diagnoseWebGL()
+    if (webgl.status !== "ok") {
+      setDiagnostics(webgl)
+      setMapError(webglHelp(webgl.status, webgl.reason))
+      return
+    }
+
+    let map: MapLibreMap | null = null
+    let cancelled = false
+
+    try {
+      map = new MapLibreMap({
+        container: containerRef.current,
+        style: STYLE_URL,
+        center: [5, 25],
+        zoom: 1.6,
+        attributionControl: { compact: true },
+        canvasContextAttributes: {
+          // Render on a software GL fallback rather than refusing the context.
+          failIfMajorPerformanceCaveat: false,
+          powerPreference: "high-performance",
+        },
+      })
+    } catch {
+      setMapError(
+        "The map renderer could not start. This is usually GPU access being blocked — enable hardware acceleration and reload."
+      )
+      return
+    }
+
+    mapRef.current = map
+    map.addControl(new NavigationControl({ visualizePitch: false }), "bottom-right")
+
+    map.on("error", (e) => {
+      const msg = e?.error?.message || "Map failed to load"
+      if (/webgl/i.test(msg)) {
+        const webgl = diagnoseWebGL()
+        setDiagnostics(webgl)
+        const status = webgl.status === "ok" ? "webgl1-only" : webgl.status
+        setMapError(webglHelp(status, webgl.reason))
+      }
+    })
+
+    map.on("load", () => {
+      if (cancelled || !map) return
+
+      map.addSource("vessels", {
+        type: "geojson",
+        data: toFeatureCollection([]),
+        cluster: true,
+        clusterMaxZoom: 9,
+        clusterRadius: 48,
+      })
+
+      map.addLayer({
+        id: "clusters",
+        type: "circle",
+        source: "vessels",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": "#0f766e",
+          "circle-stroke-color": "#5eead4",
+          "circle-stroke-width": 1.2,
+          "circle-opacity": 0.85,
+          "circle-radius": ["step", ["get", "point_count"], 16, 25, 20, 100, 26, 500, 34],
+        },
+      })
+
+      map.addLayer({
+        id: "cluster-count",
+        type: "symbol",
+        source: "vessels",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": "{point_count_abbreviated}",
+          "text-size": 11,
+          "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+        },
+        paint: {
+          "text-color": "#ecfeff",
+        },
+      })
+
+      map.addLayer({
+        id: "vessel-points",
+        type: "circle",
+        source: "vessels",
+        filter: ["!", ["has", "point_count"]],
+        paint: {
+          "circle-color": "#14b8a6",
+          "circle-radius": 4.5,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "rgba(255,255,255,0.35)",
+          "circle-opacity": 0.95,
+        },
+      })
+
+      map.on("click", "clusters", async (e) => {
+        const features = map!.queryRenderedFeatures(e.point, { layers: ["clusters"] })
+        const clusterId = features[0]?.properties?.cluster_id
+        const source = map!.getSource("vessels") as GeoJSONSource
+        if (clusterId == null) return
+        const zoom = await source.getClusterExpansionZoom(clusterId)
+        const coords = (features[0].geometry as GeoJSON.Point).coordinates as [number, number]
+        map!.easeTo({ center: coords, zoom })
+      })
+
+      map.on("click", "vessel-points", (e) => {
+        const mmsi = e.features?.[0]?.properties?.mmsi
+        if (typeof mmsi === "string") onSelectRef.current(mmsi)
+      })
+
+      map.on("mouseenter", "vessel-points", () => {
+        map!.getCanvas().style.cursor = "pointer"
+      })
+      map.on("mouseleave", "vessel-points", () => {
+        map!.getCanvas().style.cursor = ""
+      })
+      map.on("mouseenter", "clusters", () => {
+        map!.getCanvas().style.cursor = "pointer"
+      })
+      map.on("mouseleave", "clusters", () => {
+        map!.getCanvas().style.cursor = ""
+      })
+    })
+
+    return () => {
+      cancelled = true
+      safeRemoveMap(map)
+      mapRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || mapError) return
+    const source = map.getSource("vessels") as GeoJSONSource | undefined
+    if (!source) return
+    source.setData(toFeatureCollection(vessels))
+
+    if (map.getLayer("vessel-points")) {
+      map.setPaintProperty("vessel-points", "circle-color", [
+        "case",
+        ["==", ["get", "mmsi"], selectedMmsi || ""],
+        "#5eead4",
+        ["==", ["get", "mmsi"], pulseMmsi || ""],
+        "#99f6e4",
+        "#14b8a6",
+      ])
+      map.setPaintProperty("vessel-points", "circle-radius", [
+        "case",
+        ["==", ["get", "mmsi"], selectedMmsi || ""],
+        7.5,
+        ["==", ["get", "mmsi"], pulseMmsi || ""],
+        6.5,
+        4.5,
+      ])
+    }
+  }, [vessels, selectedMmsi, pulseMmsi, mapError])
+
+  useEffect(() => {
+    if (!flyTo || !mapRef.current || mapError) return
+    try {
+      mapRef.current.flyTo({
+        center: [flyTo.lon, flyTo.lat],
+        zoom: flyTo.zoom ?? 8,
+        essential: true,
+        speed: 1.1,
+      })
+    } catch {
+      // ignore fly errors during teardown
+    }
+  }, [flyTo, mapError])
+
+  return (
+    <div className="live-map-root relative" role="presentation">
+      <div ref={containerRef} className="absolute inset-0" />
+      {mapError && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#020b12]/92 px-6">
+          <div className="live-panel rounded-2xl max-w-lg p-6 text-left">
+            <p className="font-heading text-xl tracking-wide text-white">Chart unavailable</p>
+            <p className="mt-3 text-sm text-white/65 leading-relaxed">{mapError}</p>
+
+            {diagnostics && (
+              <dl className="mt-5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs font-mono">
+                <dt className="text-white/40">webgl2</dt>
+                <dd className="text-white/75">
+                  {diagnostics.status === "ok" ? "available" : "unavailable"}
+                </dd>
+                <dt className="text-white/40">webgl1</dt>
+                <dd className="text-white/75">
+                  {diagnostics.status === "none" ? "unavailable" : "available"}
+                </dd>
+                {diagnostics.renderer && (
+                  <>
+                    <dt className="text-white/40">renderer</dt>
+                    <dd className="text-white/75 break-all">{diagnostics.renderer}</dd>
+                  </>
+                )}
+                {diagnostics.reason && (
+                  <>
+                    <dt className="text-white/40">driver</dt>
+                    <dd className="text-white/75 break-all">{diagnostics.reason}</dd>
+                  </>
+                )}
+              </dl>
+            )}
+
+            <p className="mt-5 text-xs text-white/40 leading-relaxed">
+              Vessel search and details work without the chart. To fix rendering, enable
+              hardware acceleration in your browser settings and restart it.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

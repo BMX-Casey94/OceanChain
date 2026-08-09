@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <rect width="32" height="32" rx="8" fill="#020b12"/>
+  <!-- Signal rings -->
+  <circle cx="16" cy="13.5" r="8" stroke="#2dd4bf" stroke-width="1.75" opacity="0.95"/>
+  <circle cx="16" cy="13.5" r="4.75" stroke="#5eead4" stroke-width="1.1" opacity="0.45"/>
+  <!-- Beacon core -->
+  <circle cx="16" cy="13.5" r="2.15" fill="#5eead4"/>
+  <!-- Horizon wave -->
+  <path
+    d="M5.5 23.5c3.2-3.2 6.4-4.8 10.5-4.8s7.3 1.6 10.5 4.8"
+    stroke="#5eead4"
+    stroke-width="1.6"
+    stroke-linecap="round"
+    opacity="0.9"
+  />
+  <!-- Secondary ripple -->
+  <path
+    d="M8.5 26.25c2.4-1.9 4.7-2.85 7.5-2.85s5.1 0.95 7.5 2.85"
+    stroke="#2dd4bf"
+    stroke-width="1.2"
+    stroke-linecap="round"
+    opacity="0.35"
+  />
+</svg>

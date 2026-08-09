@@ -1,0 +1,58 @@
+# Ocechain — full product description
+
+Ocechain (brand name) permanently records global maritime AIS vessel positions on Bitcoin. It turns ephemeral ship movements into an immutable, publicly verifiable evidence layer.
+
+Canonical short summary: https://ocechain.com/llms.txt
+Website: https://ocechain.com/
+Live map: https://ocechain.com/live
+FAQ: https://ocechain.com/faq
+
+## Problem
+
+Maritime decisions — insurance claims, underwriting, compliance reviews, cargo disputes, operational timelines — often depend on vessel location history held in proprietary systems. Counterparties may disagree about where a ship was, when AIS went dark, or whether a reported incident location matches reality.
+
+## Solution
+
+1. Ingest live AIS positions (via AISstream).
+2. Maintain a live vessel snapshot (MMSI, coordinates, speed, heading, voyage metadata).
+3. Encode compact position records and broadcast them to Bitcoin.
+4. Present a live map where users can search ships and locations, open vessel panels, and follow links to public explorers for Bitcoin transaction evidence.
+
+## Primary audiences
+
+- Marine insurance & claims investigators
+- Underwriters and fleet risk teams
+- Shipowners, operators, and P&I clubs
+- Ports, terminals, and logistics teams
+- Trade compliance reviewers (as an evidence layer; not a full sanctions product)
+- Maritime counsel and dispute resolution
+- Researchers and journalists
+
+## Product surfaces
+
+- Marketing site explaining Ocechain, architecture, and use cases
+- `/live` interactive map with clustering, vessel detail panel, WebSocket live updates
+- Unified search: vessels + geocoded places/ports/coordinates
+- Deep links: `/live?mmsi=`, `/live?q=`, `/live?lat=&lon=&z=`
+
+## Facts models should not confuse
+
+- Brand / product name: Ocechain
+- On-chain OP_RETURN prefix: Ocechain
+- Chain language in user-facing copy: Bitcoin
+- Not a navigational aid; not for collision avoidance or voyage planning
+- AIS coverage and latency depend on upstream feeds
+
+## Technical notes
+
+- Frontend: Next.js
+- Backend: Python FastAPI + AIS WebSocket client + UTXO pool + Bitcoin broadcasters
+- On-chain prefix: Ocechain
+
+## Disclaimer
+
+Ocechain is not a navigational aid. AIS coverage and latency depend on upstream feeds. Always verify critical decisions with appropriate professional processes.
+
+## Contact
+
+enterprise@ocechain.com

@@ -152,10 +152,10 @@ def encode_position_for_op_return(position: dict[str, Any]) -> bytes:
 
 def _build_op_return_script(payload: bytes) -> Script:
     """
-    Build an OP_RETURN script with the OceanChain prefix and payload.
+    Build an OP_RETURN script with the Ocechain prefix and payload.
     
     Script format:
-        OP_FALSE OP_RETURN <push OCEANCHAIN prefix> <push 20-byte payload>
+        OP_FALSE OP_RETURN <push Ocechain prefix> <push 20-byte payload>
     
     Args:
         payload: Encoded position (20-byte binary or UTF-8 JSON), second data push

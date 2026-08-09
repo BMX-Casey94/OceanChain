@@ -1,8 +1,10 @@
 """
-OceanChain Configuration Module
+Ocechain Configuration Module
 
 Loads all configuration values from environment variables using python-dotenv.
 Exposes module-level constants for use throughout the application.
+
+Note: on-chain OP_RETURN prefix is Ocechain (brand-aligned).
 """
 
 import os
@@ -127,6 +129,23 @@ UVICORN_ACCESS_LOG: bool = os.getenv("UVICORN_ACCESS_LOG", "0").strip().lower() 
 # Server Configuration
 VPS_API_PORT: int = int(os.getenv("VPS_API_PORT", "8000"))
 
+# Public API / CORS (comma-separated origins for the Ocechain frontend)
+CORS_ALLOW_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:3000,https://ocechain.com,https://www.ocechain.com",
+    ).split(",")
+    if o.strip()
+]
+# Light rate limit for public vessel search (requests per IP per window)
+VESSEL_SEARCH_RATE_LIMIT: int = int(os.getenv("VESSEL_SEARCH_RATE_LIMIT", "60"))
+VESSEL_SEARCH_RATE_WINDOW_SECONDS: int = int(
+    os.getenv("VESSEL_SEARCH_RATE_WINDOW_SECONDS", "60")
+)
+VESSELS_LIST_DEFAULT_LIMIT: int = int(os.getenv("VESSELS_LIST_DEFAULT_LIMIT", "8000"))
+VESSELS_LIST_MAX_LIMIT: int = int(os.getenv("VESSELS_LIST_MAX_LIMIT", "20000"))
+
 # Optional: on first successful vessel broadcast after startup, write raw tx hex to this path
 # (ASCII, one line) for offline checks: POST https://api.whatsonchain.com/v1/bsv/main/tx/decode
 # with JSON {"txhex":"..."}. See scripts/woc_decode_sample.sh
@@ -137,7 +156,7 @@ LOG_SAMPLE_RAW_TX_PATH: str = os.getenv("LOG_SAMPLE_RAW_TX_PATH", "").strip()
 OCEANCHAIN_ADMIN_API_KEY: str = os.getenv("OCEANCHAIN_ADMIN_API_KEY", "").strip()
 
 # Transaction Constants
-OP_RETURN_PREFIX: bytes = b"OCEANCHAIN"
+OP_RETURN_PREFIX: bytes = b"Ocechain"
 # Second push after prefix: compact 20-byte binary (default), or UTF-8 minified JSON for human-readable explorers.
 OP_RETURN_ENCODING: str = os.getenv("OP_RETURN_ENCODING", "binary").strip().lower()
 # Fee rate: satoshis per 1000 bytes of the *serialized* transaction (standard BSV quoting).

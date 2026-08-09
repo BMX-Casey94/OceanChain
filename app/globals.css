@@ -1,63 +1,64 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@import 'maplibre-gl/dist/maplibre-gl.css';
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: hsl(220, 30%, 2%);
+  --background: hsl(204, 78%, 4%);
   --foreground: hsl(0, 0%, 98%);
-  --card: hsl(220, 25%, 4%);
+  --card: hsl(204, 45%, 6%);
   --card-foreground: hsl(0, 0%, 98%);
-  --popover: hsl(220, 25%, 4%);
+  --popover: hsl(204, 45%, 6%);
   --popover-foreground: hsl(0, 0%, 98%);
-  --primary: hsl(180, 100%, 50%);
-  --primary-foreground: hsl(220, 30%, 5%);
-  --secondary: hsl(220, 20%, 8%);
+  --primary: hsl(173, 72%, 42%);
+  --primary-foreground: hsl(204, 78%, 4%);
+  --secondary: hsl(204, 30%, 10%);
   --secondary-foreground: hsl(0, 0%, 98%);
-  --muted: hsl(220, 20%, 8%);
-  --muted-foreground: hsl(220, 10%, 64%);
-  --accent: hsl(180, 100%, 50%);
-  --accent-foreground: hsl(220, 30%, 5%);
+  --muted: hsl(204, 30%, 10%);
+  --muted-foreground: hsl(210, 12%, 62%);
+  --accent: hsl(173, 72%, 42%);
+  --accent-foreground: hsl(204, 78%, 4%);
   --destructive: hsl(0, 72%, 51%);
   --destructive-foreground: hsl(0, 0%, 98%);
-  --border: hsl(220, 20%, 15%);
-  --input: hsl(220, 20%, 15%);
-  --ring: hsl(180, 100%, 50%);
+  --border: hsl(204, 25%, 16%);
+  --input: hsl(204, 25%, 16%);
+  --ring: hsl(173, 72%, 42%);
   --radius: 0.625rem;
-  
-  /* OceanChain custom tokens */
-  --teal-neon: rgba(20, 184, 166, 1);
-  --teal-glow: rgba(20, 184, 166, 0.15);
+  --teal-neon: rgba(45, 212, 191, 1);
+  --teal-glow: rgba(45, 212, 191, 0.15);
   --success: hsl(142, 70%, 45%);
   --warning: hsl(38, 92%, 50%);
   --danger: hsl(0, 72%, 51%);
 }
 
 .dark {
-  --background: hsl(220, 30%, 2%);
+  --background: hsl(204, 78%, 4%);
   --foreground: hsl(0, 0%, 98%);
-  --card: hsl(220, 25%, 4%);
+  --card: hsl(204, 45%, 6%);
   --card-foreground: hsl(0, 0%, 98%);
-  --popover: hsl(220, 25%, 4%);
+  --popover: hsl(204, 45%, 6%);
   --popover-foreground: hsl(0, 0%, 98%);
-  --primary: hsl(180, 100%, 50%);
-  --primary-foreground: hsl(220, 30%, 5%);
-  --secondary: hsl(220, 20%, 8%);
+  --primary: hsl(173, 72%, 42%);
+  --primary-foreground: hsl(204, 78%, 4%);
+  --secondary: hsl(204, 30%, 10%);
   --secondary-foreground: hsl(0, 0%, 98%);
-  --muted: hsl(220, 20%, 8%);
-  --muted-foreground: hsl(220, 10%, 64%);
-  --accent: hsl(180, 100%, 50%);
-  --accent-foreground: hsl(220, 30%, 5%);
+  --muted: hsl(204, 30%, 10%);
+  --muted-foreground: hsl(210, 12%, 62%);
+  --accent: hsl(173, 72%, 42%);
+  --accent-foreground: hsl(204, 78%, 4%);
   --destructive: hsl(0, 72%, 51%);
   --destructive-foreground: hsl(0, 0%, 98%);
-  --border: hsl(220, 20%, 15%);
-  --input: hsl(220, 20%, 15%);
-  --ring: hsl(180, 100%, 50%);
+  --border: hsl(204, 25%, 16%);
+  --input: hsl(204, 25%, 16%);
+  --ring: hsl(173, 72%, 42%);
 }
 
 @theme inline {
-  --font-sans: var(--font-inter), 'Inter', system-ui, sans-serif;
-  --font-heading: var(--font-bebas-neue), 'Bebas Neue', system-ui, sans-serif;
+  --font-sans: var(--font-dm-sans), 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-syne), 'Syne', ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-instrument-serif), 'Instrument Serif', ui-serif, Georgia, serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, 'SFMono-Regular', monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -92,28 +93,147 @@
   * {
     @apply border-border outline-ring/50;
   }
-  
+
   html {
     color-scheme: dark;
+    /* Scroll container for parallax measurement; must not be static. */
+    position: relative;
   }
-  
+
   body {
     @apply text-foreground antialiased;
-    background: linear-gradient(135deg, #000d14 0%, #000000 100%);
+    background: linear-gradient(165deg, #020b12 0%, #010608 45%, #000000 100%);
     min-height: 100vh;
   }
 }
 
-/* Glass Card Component - using pure CSS to avoid @apply issues */
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  z-index: 100;
+  padding: 0.75rem 1rem;
+  background: #0d9488;
+  color: white;
+}
+
+.skip-link:focus {
+  left: 1rem;
+  top: 1rem;
+}
+
+/* Photograph only — the darkening gradient lives in .hero-scrim so it stays
+   anchored to the section while this layer parallaxes. */
+.hero-ocean-bg {
+  background-image: url('https://hebbkx1anhila5yf.public.blob.vercel-storage.com/image-nWbwwzoSSXklmwsECxOBPaExHlpBC8.png');
+  background-size: cover;
+  background-position: center;
+  filter: brightness(1.28) saturate(1.14) contrast(1.02);
+  opacity: 0.5;
+  will-change: transform;
+}
+
+.hero-scrim {
+  background: linear-gradient(
+    to bottom,
+    rgba(2, 11, 18, 0.42) 0%,
+    rgba(2, 11, 18, 0.3) 28%,
+    rgba(2, 11, 18, 0.62) 72%,
+    rgba(2, 11, 18, 0.96) 100%
+  );
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: rgba(94, 234, 212, 0.72);
+}
+
+.rule-hairline {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    rgba(45, 212, 191, 0.5),
+    rgba(45, 212, 191, 0.08) 45%,
+    transparent
+  );
+}
+
+.data-label {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.hero-glow {
+  background:
+    radial-gradient(ellipse 70% 50% at 50% 38%, rgba(45, 212, 191, 0.18), transparent 70%),
+    radial-gradient(ellipse 45% 35% at 82% 18%, rgba(56, 189, 248, 0.1), transparent 72%);
+}
+
+.hero-horizon {
+  background:
+    linear-gradient(to top, rgba(2, 11, 18, 0.92), transparent 78%),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 88px,
+      rgba(45, 212, 191, 0.045) 88px,
+      rgba(45, 212, 191, 0.045) 89px
+    );
+  will-change: transform;
+}
+
+.section-veil {
+  background:
+    radial-gradient(ellipse 60% 45% at 15% 25%, rgba(45, 212, 191, 0.09), transparent 70%),
+    radial-gradient(ellipse 55% 40% at 85% 75%, rgba(56, 189, 248, 0.06), transparent 72%);
+}
+
+.text-glow-soft {
+  text-shadow: 0 0 28px rgba(45, 212, 191, 0.35), 0 0 60px rgba(45, 212, 191, 0.12);
+}
+
+.live-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: #2dd4bf;
+  box-shadow: 0 0 10px rgba(45, 212, 191, 0.7);
+  display: inline-block;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .live-dot {
+    animation: live-pulse 2s ease-in-out infinite;
+  }
+}
+
+@keyframes live-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.65; }
+}
+
 .glass-card {
   border-radius: 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   position: relative;
   overflow: hidden;
-  background: linear-gradient(135deg, rgba(0,7,12,0.97) 0%, rgba(0,0,0,1) 100%);
-  box-shadow: 0 0 0 1px rgba(20,184,166,0.06), 0 8px 32px rgba(0,0,0,0.5);
+  background: linear-gradient(145deg, rgba(2, 14, 22, 0.92) 0%, rgba(0, 0, 0, 0.92) 100%);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.05), 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
 .glass-card::before {
@@ -123,108 +243,63 @@
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(20,184,166,0.4), transparent);
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.35), transparent);
 }
 
-/* Inner Panel for nested cards */
 .inner-panel {
   border-radius: 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255,255,255,0.025);
+  background: rgba(255, 255, 255, 0.025);
 }
 
-/* Primary Neon Button */
 .btn-neon {
-  padding: 0.75rem 1.5rem;
+  padding: 0.8rem 1.5rem;
   border-radius: 0.5rem;
   font-family: var(--font-sans);
   font-size: 0.875rem;
-  font-weight: 500;
+  font-weight: 560;
   color: white;
-  transition: all 0.3s ease;
-  background: linear-gradient(135deg, #2dd4bf, #0d9488);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
+  background: linear-gradient(135deg, #2dd4bf, #0f766e);
 }
 
 .btn-neon:hover {
-  background: linear-gradient(135deg, #14b8a6, #0f766e);
-  box-shadow: 0 0 20px rgba(20,184,166,0.4);
-  transform: scale(1.02);
+  background: linear-gradient(135deg, #5eead4, #0d9488);
+  box-shadow: 0 0 24px rgba(45, 212, 191, 0.28);
+  transform: translateY(-1px);
 }
 
 .btn-neon:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(20,184,166,0.5);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.55);
 }
 
-/* Outline Neon Button */
 .btn-outline-neon {
-  padding: 0.75rem 1.5rem;
+  padding: 0.8rem 1.5rem;
   border-radius: 0.5rem;
   font-family: var(--font-sans);
   font-size: 0.875rem;
-  font-weight: 500;
-  transition: all 0.3s ease;
-  border: 2px solid rgba(20,184,166,0.6);
-  background: rgba(0,0,0,0.8);
-  color: #14b8a6;
+  font-weight: 560;
+  transition: all 0.25s ease;
+  border: 1px solid rgba(45, 212, 191, 0.55);
+  background: rgba(2, 11, 18, 0.75);
+  color: #5eead4;
 }
 
 .btn-outline-neon:hover {
-  border-color: rgba(20,184,166,1);
-  box-shadow: 0 0 16px rgba(20,184,166,0.3);
-  transform: scale(1.02);
+  border-color: rgba(45, 212, 191, 0.95);
+  box-shadow: 0 0 18px rgba(45, 212, 191, 0.2);
+  transform: translateY(-1px);
 }
 
 .btn-outline-neon:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(20,184,166,0.5);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.55);
 }
 
-/* Neon Input */
-.input-neon {
-  padding: 0.75rem 1rem;
-  border-radius: 0.5rem;
-  color: white;
-  transition: all 0.3s ease;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.1);
-}
-
-.input-neon::placeholder {
-  color: #6b7280;
-}
-
-.input-neon:focus {
-  outline: none;
-  border-color: #14b8a6;
-  box-shadow: 0 0 0 2px rgba(20,184,166,0.2), 0 0 20px rgba(20,184,166,0.1);
-}
-
-/* Card Hover Utility */
-.card-hover {
-  transition: all 0.3s ease;
-}
-
-.card-hover:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 0 0 1px rgba(20,184,166,0.1), 0 8px 32px rgba(0,0,0,0.5), 0 0 30px rgba(20,184,166,0.1);
-}
-
-/* PM Card (alternative card style) */
-.pm-card {
-  border-radius: 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  position: relative;
-  overflow: hidden;
-  background: linear-gradient(135deg, rgba(0,7,12,0.97) 0%, rgba(0,0,0,1) 100%);
-  box-shadow: 0 0 0 1px rgba(20,184,166,0.06), 0 8px 32px rgba(0,0,0,0.5);
-}
-
-/* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -232,27 +307,20 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(20,184,166,0.2);
+  background: rgba(45, 212, 191, 0.22);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(20,184,166,0.4);
+  background: rgba(45, 212, 191, 0.4);
 }
 
-/* Particle Float Animation with reduced motion support */
 @media (prefers-reduced-motion: no-preference) {
   @keyframes particle-float {
-    0% {
-      transform: translateY(0);
-      opacity: 1;
-    }
-    100% {
-      transform: translateY(-100px);
-      opacity: 0;
-    }
+    0% { transform: translateY(0); opacity: 1; }
+    100% { transform: translateY(-100px); opacity: 0; }
   }
-  
+
   .particle {
     animation: particle-float var(--duration, 10s) linear infinite;
     animation-delay: var(--delay, 0s);
@@ -263,46 +331,304 @@
   .particle {
     animation: none;
   }
-  
+
   .marquee-content {
     animation-play-state: paused !important;
   }
+
+  .scroll-indicator {
+    animation: none !important;
+  }
 }
 
-/* Marquee Animation */
 @keyframes marquee {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-50%);
-  }
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
 }
 
 .marquee-content {
-  animation: marquee 40s linear infinite;
+  animation: marquee 48s linear infinite;
+  width: max-content;
 }
 
 .marquee-content:hover {
   animation-play-state: paused;
 }
 
-/* Bounce Animation for scroll indicator */
 @keyframes bounce {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-10px);
-  }
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
 }
 
 .scroll-indicator {
   animation: bounce 2s ease-in-out infinite;
 }
 
-/* Focus visible for accessibility */
+/* Maritime icon motion — subtle presence, not noise */
+.icon-marine-bob,
+.icon-marine-bob-soft,
+.icon-marine-radar-dish,
+.icon-marine-block-rear,
+.icon-marine-block-front,
+.icon-marine-shield,
+.icon-marine-hoist,
+.icon-marine-halo,
+.icon-marine-wave,
+.icon-marine-ping,
+.icon-marine-beacon-core,
+.icon-marine-beams,
+.icon-marine-link,
+.icon-marine-gleam {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes icon-marine-bob {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    50% { transform: translateY(-2.5px) rotate(-0.6deg); }
+  }
+
+  @keyframes icon-marine-bob-soft {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
+
+  @keyframes icon-marine-wave {
+    0%, 100% { transform: translateX(0); opacity: 0.45; }
+    50% { transform: translateX(3px); opacity: 0.7; }
+  }
+
+  @keyframes icon-marine-halo {
+    0%, 100% { opacity: 0.85; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.06); }
+  }
+
+  @keyframes icon-marine-ping {
+    0%, 100% { opacity: 0.15; }
+    40% { opacity: 0.9; }
+    70% { opacity: 0.35; }
+  }
+
+  @keyframes icon-marine-radar-dish {
+    0%, 100% { transform: rotate(0deg); }
+    50% { transform: rotate(2.5deg); }
+  }
+
+  @keyframes icon-marine-beacon-core {
+    0%, 100% { opacity: 0.75; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.25); }
+  }
+
+  @keyframes icon-marine-beams {
+    0%, 100% { opacity: 0.45; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes icon-marine-block-rear {
+    0%, 100% { transform: translate(0, 0); }
+    50% { transform: translate(1px, -1.5px); }
+  }
+
+  @keyframes icon-marine-block-front {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-1px); }
+  }
+
+  @keyframes icon-marine-link {
+    0%, 100% { opacity: 0.45; stroke-dashoffset: 8; }
+    50% { opacity: 1; stroke-dashoffset: 0; }
+  }
+
+  @keyframes icon-marine-gleam {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes icon-marine-shield {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-1.5px); }
+  }
+
+  @keyframes icon-marine-hoist {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(4px); }
+  }
+
+  .icon-marine-bob {
+    animation: icon-marine-bob 4.2s ease-in-out infinite;
+  }
+
+  .icon-marine-bob-soft {
+    animation: icon-marine-bob-soft 3.6s ease-in-out infinite;
+  }
+
+  .icon-marine-wave {
+    animation: icon-marine-wave 3.8s ease-in-out infinite;
+  }
+
+  .icon-marine-wave-delayed {
+    animation-delay: 0.9s;
+    animation-duration: 4.4s;
+  }
+
+  .icon-marine-halo {
+    animation: icon-marine-halo 4s ease-in-out infinite;
+  }
+
+  .icon-marine-ping {
+    animation: icon-marine-ping 2.4s ease-in-out infinite;
+  }
+
+  .icon-marine-ping-2 {
+    animation-delay: 0.35s;
+  }
+
+  .icon-marine-ping-3 {
+    animation-delay: 0.7s;
+  }
+
+  .icon-marine-radar-dish {
+    animation: icon-marine-radar-dish 5s ease-in-out infinite;
+    transform-origin: 49px 48px;
+  }
+
+  .icon-marine-beacon-core {
+    animation: icon-marine-beacon-core 2.2s ease-in-out infinite;
+  }
+
+  .icon-marine-beams {
+    animation: icon-marine-beams 2.2s ease-in-out infinite;
+  }
+
+  .icon-marine-block-rear {
+    animation: icon-marine-block-rear 4.5s ease-in-out infinite;
+  }
+
+  .icon-marine-block-front {
+    animation: icon-marine-block-front 4.5s ease-in-out infinite;
+  }
+
+  .icon-marine-link {
+    stroke-dasharray: 12 6;
+    animation: icon-marine-link 2.8s ease-in-out infinite;
+  }
+
+  .icon-marine-gleam {
+    animation: icon-marine-gleam 3s ease-in-out infinite;
+  }
+
+  .icon-marine-shield {
+    animation: icon-marine-shield 4.8s ease-in-out infinite;
+  }
+
+  .icon-marine-hoist {
+    animation: icon-marine-hoist 3.4s ease-in-out infinite;
+    transform-origin: 58px 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-marine-bob,
+  .icon-marine-bob-soft,
+  .icon-marine-wave,
+  .icon-marine-halo,
+  .icon-marine-ping,
+  .icon-marine-radar-dish,
+  .icon-marine-beacon-core,
+  .icon-marine-beams,
+  .icon-marine-block-rear,
+  .icon-marine-block-front,
+  .icon-marine-link,
+  .icon-marine-gleam,
+  .icon-marine-shield,
+  .icon-marine-hoist {
+    animation: none !important;
+  }
+
+  .payload-caret,
+  .payload-status-dot {
+    animation: none !important;
+  }
+}
+
+/* Architecture payload decode panel */
+.payload-caret {
+  display: inline-block;
+  width: 0.55ch;
+  height: 1.05em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: #5eead4;
+  box-shadow: 0 0 10px rgba(45, 212, 191, 0.45);
+}
+
+.payload-status-dot {
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.65);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .payload-caret {
+    animation: payload-caret-blink 0.9s steps(1, end) infinite;
+  }
+
+  .payload-status-dot {
+    animation: live-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes payload-caret-blink {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
 *:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.5);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.5);
+}
+
+.live-search-shell {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.live-search-shell:focus-within {
+  border-color: rgba(45, 212, 191, 0.35);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.18);
+}
+
+.live-search-input:focus,
+.live-search-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Live map chrome */
+.live-shell {
+  position: relative;
+  height: 100svh;
+  width: 100%;
+  overflow: hidden;
+  background: #020b12;
+}
+
+.live-map-root,
+.live-map-root .maplibregl-map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.live-panel {
+  background: linear-gradient(160deg, rgba(2, 14, 22, 0.94), rgba(0, 0, 0, 0.9));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  background: rgba(0, 0, 0, 0.45) !important;
+  color: rgba(255, 255, 255, 0.55) !important;
 }
