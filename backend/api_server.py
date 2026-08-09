@@ -203,6 +203,7 @@ async def health_check() -> JSONResponse:
         "ais_vessels": ais_status.get("vessels", len(snapshot)),
         "ais_connected": ais_status.get("connected"),
         "ais_messages": ais_status.get("messages"),
+        "ais_frames_received": ais_status.get("frames_received"),
         "ais_rate_limited": ais_status.get("rate_limited"),
         "ais_rate_limited_for_seconds": ais_status.get("rate_limited_for_seconds"),
         "ais_last_error": ais_status.get("last_error"),

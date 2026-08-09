@@ -252,6 +252,7 @@ class AISClient:
         self._connected: bool = False
         self._reconnect_delay: float = 5.0
         self._message_count: int = 0
+        self._frames_received: int = 0
         self._last_message_time: Optional[datetime] = None
         self._last_error: Optional[str] = None
         self._rate_limited_until: float = 0.0
@@ -277,6 +278,7 @@ class AISClient:
             "connected": self._connected,
             "vessels": len(self._snapshot),
             "messages": self._message_count,
+            "frames_received": self._frames_received,
             "rate_limited": rate_limited,
             "rate_limited_for_seconds": (
                 max(0, int(self._rate_limited_until - now)) if rate_limited else 0
@@ -317,22 +319,43 @@ class AISClient:
 
     async def _handle_message(self, raw_message: str) -> None:
         try:
+            self._frames_received += 1
+            if self._frames_received <= 5:
+                preview = raw_message if isinstance(raw_message, str) else repr(raw_message)
+                logger.info(
+                    "AIS frame #%s (%s bytes): %s",
+                    self._frames_received,
+                    len(preview),
+                    preview[:400],
+                )
+
             message = json.loads(raw_message)
 
             # AISstream auth / subscription failures arrive as plain error objects
             if isinstance(message, dict) and "error" in message and "MessageType" not in message:
                 logger.error("AISstream error: %s", message.get("error"))
+                self._last_error = str(message.get("error"))
                 return
 
             message_type = message.get("MessageType", "")
 
             if message_type not in AISSTREAM_FILTER_MESSAGE_TYPES:
-                if message_type and self._message_count == 0:
-                    logger.info("Ignoring AIS message type %s (not in filter)", message_type)
+                if self._frames_received <= 20:
+                    logger.info(
+                        "Ignoring AIS message type %r (filter=%s)",
+                        message_type or "(empty)",
+                        list(AISSTREAM_FILTER_MESSAGE_TYPES),
+                    )
                 return
 
             position = parse_ais_position_message(message)
             if not position:
+                if self._frames_received <= 20:
+                    logger.warning(
+                        "Failed to parse %s frame #%s",
+                        message_type,
+                        self._frames_received,
+                    )
                 return
 
             self._merge_into_snapshot(position, message_type)
@@ -384,6 +407,7 @@ class AISClient:
         self._last_error = None
         self._rate_limit_hits = 0
         self._rate_limited_until = 0.0
+        self._frames_received = 0
         return websocket
 
     async def run(self) -> None:
