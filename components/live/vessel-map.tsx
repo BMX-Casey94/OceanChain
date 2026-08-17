@@ -351,9 +351,14 @@ export function VesselMap({
   useEffect(() => {
     if (!flyTo || !mapRef.current || mapError) return
     try {
-      mapRef.current.flyTo({
+      const map = mapRef.current
+      const currentZoom = map.getZoom()
+      // Keep current zoom if already closer than the requested target (vessel select default 8).
+      const targetZoom =
+        flyTo.zoom != null ? Math.max(currentZoom, flyTo.zoom) : currentZoom
+      map.flyTo({
         center: [flyTo.lon, flyTo.lat],
-        zoom: flyTo.zoom ?? 8,
+        zoom: targetZoom,
         essential: true,
         speed: 1.1,
       })
