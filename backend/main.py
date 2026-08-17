@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from typing import Any, Optional
 
 import asyncpg
@@ -21,6 +22,10 @@ from config import (
     DATABASE_URL,
     BATCH_INTERVAL_SECONDS,
     BROADCAST_CONCURRENCY,
+    BROADCAST_MOVING_INTERVAL_SECONDS,
+    BROADCAST_MOVING_SPEED_KN,
+    BROADCAST_POSITION_JUMP_NM,
+    BROADCAST_STATIONARY_INTERVAL_SECONDS,
     VPS_API_PORT,
     GORILLA_TX_FORMAT,
     UTXO_AUTO_REFILL_ON_START,
@@ -48,7 +53,7 @@ from api_server import (
     update_vessel_count,
     broadcast_tx_event,
 )
-from vessel_api import set_vessel_snapshot_provider
+from vessel_api import get_last_tx, haversine_nm, set_vessel_snapshot_provider
 
 # Configure logging
 logging.basicConfig(
@@ -61,6 +66,76 @@ logger = logging.getLogger(__name__)
 
 # Global database pool
 db_pool: Optional[asyncpg.Pool] = None
+
+# Per-MMSI broadcast policy state (process-local; survives UTXO restarts only if process does).
+_next_due_by_mmsi: dict[str, float] = {}
+_last_pos_by_mmsi: dict[str, tuple[float, float]] = {}
+
+
+def _is_moving(position: dict[str, Any]) -> bool:
+    try:
+        return float(position.get("speed", 0.0)) >= BROADCAST_MOVING_SPEED_KN
+    except (TypeError, ValueError):
+        return False
+
+
+def _policy_interval_seconds(position: dict[str, Any]) -> int:
+    return (
+        BROADCAST_MOVING_INTERVAL_SECONDS
+        if _is_moving(position)
+        else BROADCAST_STATIONARY_INTERVAL_SECONDS
+    )
+
+
+def _should_attempt(mmsi: str, position: dict[str, Any], now: float) -> bool:
+    """
+    True if this MMSI is due for an on-chain write.
+
+    - Never broadcast: due now
+    - Otherwise: due when next_due has passed
+    - Optional: immediate if position jumped more than BROADCAST_POSITION_JUMP_NM
+    """
+    due = _next_due_by_mmsi.get(mmsi, 0.0)
+    if due == 0.0:
+        # First time seen this process: respect any in-memory last tx (e.g. after restart).
+        last = get_last_tx(mmsi)
+        if last and last.get("timestamp"):
+            last_ts = float(last["timestamp"])
+            interval = _policy_interval_seconds(position)
+            due = last_ts + interval
+            _next_due_by_mmsi[mmsi] = due
+            if now < due:
+                return False
+    if now >= due:
+        return True
+
+    if BROADCAST_POSITION_JUMP_NM > 0:
+        last_pos = _last_pos_by_mmsi.get(mmsi)
+        try:
+            lat = float(position.get("latitude", 0.0))
+            lon = float(position.get("longitude", 0.0))
+        except (TypeError, ValueError):
+            return False
+        if last_pos is not None:
+            dist = haversine_nm(last_pos[0], last_pos[1], lat, lon)
+            if dist >= BROADCAST_POSITION_JUMP_NM:
+                return True
+    return False
+
+
+def _mark_attempt(mmsi: str, position: dict[str, Any], now: float, success: bool) -> None:
+    """Update due time and last position after an attempt."""
+    try:
+        lat = float(position.get("latitude", 0.0))
+        lon = float(position.get("longitude", 0.0))
+        _last_pos_by_mmsi[mmsi] = (lat, lon)
+    except (TypeError, ValueError):
+        pass
+    if success:
+        _next_due_by_mmsi[mmsi] = now + _policy_interval_seconds(position)
+    else:
+        # Avoid hammering a failing MMSI every tick; retry soon but not instantly.
+        _next_due_by_mmsi[mmsi] = now + min(30.0, BATCH_INTERVAL_SECONDS * 2)
 
 
 async def process_vessel(
@@ -219,9 +294,11 @@ async def broadcasting_loop() -> None:
     3. Log batch statistics
     """
     logger.info(
-        "Broadcasting loop starting, interval: %ss, concurrency: %s",
+        "Broadcasting loop starting, tick: %ss, concurrency: %s, moving: %ss, stationary: %ss",
         BATCH_INTERVAL_SECONDS,
         BROADCAST_CONCURRENCY,
+        BROADCAST_MOVING_INTERVAL_SECONDS,
+        BROADCAST_STATIONARY_INTERVAL_SECONDS,
     )
     
     change_address = get_change_address()
@@ -247,7 +324,7 @@ async def broadcasting_loop() -> None:
             # Get current snapshot
             snapshot = ais_client.get_current_snapshot()
             vessel_count = len(snapshot)
-            
+
             if vessel_count == 0:
                 logger.debug("No vessels in snapshot, skipping batch")
                 continue
@@ -264,31 +341,44 @@ async def broadcasting_loop() -> None:
                 )
                 continue
 
+            now = time.time()
+            due_items = [
+                (mmsi, position)
+                for mmsi, position in snapshot.items()
+                if _should_attempt(mmsi, position, now)
+            ]
+            due_count = len(due_items)
+
             logger.debug(
-                "Starting batch: %s vessels (pool depth %s)",
+                "Scheduler: %s vessels in snapshot, %s due (pool depth %s)",
                 vessel_count,
+                due_count,
                 pool_ready,
             )
             update_vessel_count(vessel_count)
-            
-            # Process vessels concurrently with semaphore
+
+            if due_count == 0:
+                continue
+
+            # Process due vessels concurrently with semaphore
             semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
-            
-            tasks = [
-                process_vessel(
+
+            async def run_one(mmsi: str, position: dict[str, Any]) -> bool:
+                ok = await process_vessel(
                     semaphore,
                     mmsi,
                     position,
                     change_address,
                     gorilla_prevout_locking_script_hex,
                 )
-                for mmsi, position in snapshot.items()
-            ]
-            
+                _mark_attempt(mmsi, position, now, ok)
+                return ok
+
+            tasks = [run_one(mmsi, position) for mmsi, position in due_items]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             successes = sum(1 for r in results if r is True)
-            failures = vessel_count - successes
+            failures = due_count - successes
             task_errors = [r for r in results if isinstance(r, BaseException)]
             for err in task_errors:
                 if isinstance(err, asyncio.CancelledError):
@@ -297,9 +387,9 @@ async def broadcasting_loop() -> None:
                 logger.error("Batch task exception: %s", err, exc_info=err)
 
             logger.debug(
-                "Batch complete: %s/%s ok, %s failed",
+                "Batch complete: %s/%s due ok, %s failed",
                 successes,
-                vessel_count,
+                due_count,
                 failures,
             )
         

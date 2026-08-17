@@ -97,7 +97,7 @@ export function VesselPanel({
           label="Last Bitcoin tx"
           value={
             vessel.last_txid
-              ? `0-conf · ${vessel.last_txid.slice(0, 16)}…`
+              ? `${vessel.last_txid.slice(0, 16)}…`
               : "Not broadcast yet"
           }
         />

@@ -87,7 +87,9 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/
 # Each vessel tx spends one pool UTXO; fee is only tens–low hundreds of sats at typical sizes/rates.
 # Smaller UTXO_VALUE_EACH + higher UTXO_POOL_TARGET = less capital locked, more rows (fan-out needs
 # one wallet input covering TARGET × VALUE_EACH + fan-out fee).
-UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "800"))
+# Target spendable pool size. Sustained tx/s ≈ pool_depth / ARC latency; policy scheduler
+# needs several thousand slots for ~100+ tx/s with ~5s ARC round-trips.
+UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "5000"))
 UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "3000"))
 MIN_CHANGE_OUTPUT_SAT: int = int(os.getenv("MIN_CHANGE_OUTPUT_SAT", "1"))
 # If true, run one fan-out from the funded wallet when the pool is empty at startup.
@@ -117,6 +119,15 @@ DB_POOL_MAX_SIZE: int = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
 # Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
 BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "450"))
+# Policy: minimum seconds between on-chain writes per MMSI (insurance-friendly defaults).
+BROADCAST_MOVING_INTERVAL_SECONDS: int = int(os.getenv("BROADCAST_MOVING_INTERVAL_SECONDS", "90"))
+BROADCAST_STATIONARY_INTERVAL_SECONDS: int = int(
+    os.getenv("BROADCAST_STATIONARY_INTERVAL_SECONDS", "600")
+)
+# Speed (kn) at or above which a vessel counts as moving.
+BROADCAST_MOVING_SPEED_KN: float = float(os.getenv("BROADCAST_MOVING_SPEED_KN", "0.5"))
+# Optional: write immediately when a vessel moves more than this many nautical miles since last tx.
+BROADCAST_POSITION_JUMP_NM: float = float(os.getenv("BROADCAST_POSITION_JUMP_NM", "0.25"))
 # App-side ARC target status. The broadcaster submits first, then polls GET /tx/{txid}
 # until this lifecycle state is reached before counting the tx as successful.
 ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "SEEN_ON_NETWORK").strip().upper()
@@ -243,6 +254,15 @@ def validate_config() -> list[str]:
         errors.append("BROADCAST_CONCURRENCY must be >= 1")
     elif BROADCAST_CONCURRENCY > 512:
         errors.append("BROADCAST_CONCURRENCY must be <= 512")
+
+    if BROADCAST_MOVING_INTERVAL_SECONDS < 10:
+        errors.append("BROADCAST_MOVING_INTERVAL_SECONDS must be >= 10")
+    if BROADCAST_STATIONARY_INTERVAL_SECONDS < 60:
+        errors.append("BROADCAST_STATIONARY_INTERVAL_SECONDS must be >= 60")
+    if BROADCAST_MOVING_SPEED_KN < 0:
+        errors.append("BROADCAST_MOVING_SPEED_KN must be >= 0")
+    if BROADCAST_POSITION_JUMP_NM < 0:
+        errors.append("BROADCAST_POSITION_JUMP_NM must be >= 0")
 
     allowed_arc_wait = {
         "UNKNOWN",
