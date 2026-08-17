@@ -71,6 +71,18 @@ def _heading_from_raw(raw: Any) -> int:
         return 0xFFFF
 
 
+def _sog_knots(body: dict[str, Any]) -> float:
+    """AISstream Class A PositionReport uses Sog (knots). 102.3 = not available."""
+    raw = body.get("Sog", body.get("SpeedOverGround", body.get("SOG")))
+    try:
+        sog = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if sog >= 102.2:
+        return 0.0
+    return max(0.0, sog)
+
+
 def _metadata_strings(metadata: dict[str, Any]) -> dict[str, Any]:
     ship_name = _meta_str(metadata, "ShipName", "shipName", max_len=48)
     call_sign = _meta_str(metadata, "CallSign", "Callsign", "callSign", max_len=12)
@@ -117,7 +129,7 @@ def _parse_position_report(message: dict[str, Any]) -> Optional[dict[str, Any]]:
             **meta,
             "latitude": float(position_report.get("Latitude", 0.0)),
             "longitude": float(position_report.get("Longitude", 0.0)),
-            "speed": float(position_report.get("SpeedOverGround", 0.0)),
+            "speed": _sog_knots(position_report),
             "heading": _heading_from_raw(position_report.get("TrueHeading", 511)),
             "timestamp": _timestamp_from_metadata(metadata),
         }
@@ -142,7 +154,7 @@ def _parse_standard_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]
             **meta,
             "latitude": float(body.get("Latitude", 0.0)),
             "longitude": float(body.get("Longitude", 0.0)),
-            "speed": float(body.get("Sog", 0.0)),
+            "speed": _sog_knots(body),
             "heading": _heading_from_raw(body.get("TrueHeading", 511)),
             "timestamp": _timestamp_from_metadata(metadata),
         }
@@ -177,7 +189,7 @@ def _parse_extended_class_b(message: dict[str, Any]) -> Optional[dict[str, Any]]
             **meta,
             "latitude": float(body.get("Latitude", 0.0)),
             "longitude": float(body.get("Longitude", 0.0)),
-            "speed": float(body.get("Sog", 0.0)),
+            "speed": _sog_knots(body),
             "heading": _heading_from_raw(body.get("TrueHeading", 511)),
             "timestamp": _timestamp_from_metadata(metadata),
         }
@@ -207,7 +219,7 @@ def _parse_long_range(message: dict[str, Any]) -> Optional[dict[str, Any]]:
             **meta,
             "latitude": float(body.get("Latitude", 0.0)),
             "longitude": float(body.get("Longitude", 0.0)),
-            "speed": float(body.get("Sog", 0.0)),
+            "speed": _sog_knots(body),
             "heading": heading,
             "timestamp": _timestamp_from_metadata(metadata),
         }
