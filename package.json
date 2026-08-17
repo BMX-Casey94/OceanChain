@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "sync:maplibre-worker": "node scripts/sync-maplibre-worker.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

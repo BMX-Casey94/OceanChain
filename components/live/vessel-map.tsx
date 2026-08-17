@@ -4,11 +4,17 @@ import { useEffect, useRef, useState } from "react"
 import {
   Map as MapLibreMap,
   NavigationControl,
+  setWorkerUrl,
   type GeoJSONSource,
 } from "maplibre-gl"
 import type { VesselSummary } from "@/lib/api"
 
 const STYLE_URL = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+
+// Next/Turbopack does not emit the worker's sibling shared chunk. Serve both from
+// /public/maplibre (see MapLibre v6 Next.js install notes) or the browser requests
+// /live as a module and fails with MIME text/html.
+setWorkerUrl("/maplibre/maplibre-gl-worker.mjs")
 
 type VesselMapProps = {
   vessels: VesselSummary[]
