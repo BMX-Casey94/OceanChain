@@ -1,19 +1,68 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { getApiBase, getWsUrl, type TxEvent } from "@/lib/api"
+import {
+  fetchApiHealth,
+  fetchTickerBroadcasts,
+  getApiBase,
+  getWsUrl,
+  type TxEvent,
+} from "@/lib/api"
 
 type TickerItem = {
+  key: string
   name: string
   coords: string
   speed: string
   tx: string
 }
 
+const TICKER_POLL_MS = 10_000
+const TICKER_LIMIT = 24
+const MARQUEE_MIN_ITEMS = 16
+
 function formatCoords(lat: number, lon: number): string {
   const ns = lat >= 0 ? "N" : "S"
   const ew = lon >= 0 ? "E" : "W"
   return `${Math.abs(lat).toFixed(1)}°${ns} ${Math.abs(lon).toFixed(1)}°${ew}`
+}
+
+function toTickerItem(tx: TxEvent): TickerItem | null {
+  const txid = String(tx.txid || "").trim()
+  const mmsi = String(tx.mmsi || "").trim()
+  if (!txid || !mmsi) return null
+  const lat = Number(tx.lat)
+  const lon = Number(tx.lon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  const name = (tx.vessel_name || `MMSI ${mmsi}`).trim()
+  return {
+    key: `${txid}:${mmsi}`,
+    name,
+    coords: formatCoords(lat, lon),
+    speed: `${Number(tx.speed || 0).toFixed(0)}kn`,
+    tx: `${txid.slice(0, 8)}…`,
+  }
+}
+
+function mergeItems(prev: TickerItem[], incoming: TickerItem[]): TickerItem[] {
+  const seen = new Set<string>()
+  const out: TickerItem[] = []
+  for (const item of [...incoming, ...prev]) {
+    if (seen.has(item.key)) continue
+    seen.add(item.key)
+    out.push(item)
+    if (out.length >= TICKER_LIMIT) break
+  }
+  return out
+}
+
+function fillSequence(items: TickerItem[]): TickerItem[] {
+  if (items.length === 0) return items
+  const out = [...items]
+  while (out.length < MARQUEE_MIN_ITEMS) {
+    out.push(...items)
+  }
+  return out
 }
 
 function VesselEntry({ vessel }: { vessel: TickerItem }) {
@@ -40,17 +89,30 @@ export function Ticker() {
     let closed = false
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    let pollTimer: ReturnType<typeof setInterval> | undefined
 
     const pushEvent = (tx: TxEvent) => {
-      const name = (tx.vessel_name || `MMSI ${tx.mmsi}`).trim()
-      const item: TickerItem = {
-        name,
-        coords: formatCoords(tx.lat, tx.lon),
-        speed: `${Number(tx.speed || 0).toFixed(0)}kn`,
-        tx: `${String(tx.txid || "").slice(0, 8)}…`,
-      }
-      setItems((prev) => [item, ...prev].slice(0, 24))
+      const item = toTickerItem(tx)
+      if (!item) return
+      setItems((prev) => mergeItems(prev, [item]))
       setLive(true)
+    }
+
+    const seedFromRest = async () => {
+      if (!base) return
+      const rows = await fetchTickerBroadcasts(TICKER_LIMIT)
+      if (closed) return
+      const mapped = rows
+        .map(toTickerItem)
+        .filter((row): row is TickerItem => row !== null)
+      if (mapped.length > 0) {
+        setItems((prev) => mergeItems(prev, mapped))
+        setLive(true)
+        return
+      }
+      const health = await fetchApiHealth()
+      if (closed) return
+      if (health?.status === "ok") setLive(true)
     }
 
     const connect = () => {
@@ -58,7 +120,6 @@ export function Ticker() {
       ws = new WebSocket(wsUrl)
       ws.onopen = () => setLive(true)
       ws.onclose = () => {
-        setLive(false)
         if (!closed) reconnectTimer = setTimeout(connect, 4000)
       }
       ws.onerror = () => ws?.close()
@@ -72,10 +133,18 @@ export function Ticker() {
       }
     }
 
+    void seedFromRest()
+    if (base) {
+      pollTimer = setInterval(() => {
+        void seedFromRest()
+      }, TICKER_POLL_MS)
+    }
     connect()
+
     return () => {
       closed = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (pollTimer) clearInterval(pollTimer)
       ws?.close()
     }
   }, [])
@@ -85,12 +154,16 @@ export function Ticker() {
       ? items
       : [
           {
+            key: "placeholder",
             name: live ? "Awaiting next vessel record…" : "Connecting to live fleet…",
             coords: "—",
             speed: "—",
             tx: "—",
           },
         ]
+
+  const sequence = fillSequence(display)
+  const loop = [...sequence, ...sequence]
 
   return (
     <div
@@ -99,8 +172,8 @@ export function Ticker() {
       aria-label="Live vessel tracking ticker"
     >
       <div className="marquee-content flex items-center">
-        {[...display, ...display].map((vessel, index) => (
-          <div key={`${vessel.name}-${index}`} className="flex items-center">
+        {loop.map((vessel, index) => (
+          <div key={`${vessel.key}-${index}`} className="flex items-center">
             <VesselEntry vessel={vessel} />
             <span className="text-teal-400/40 mx-6" aria-hidden="true">
               |

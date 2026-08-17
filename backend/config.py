@@ -180,6 +180,9 @@ VESSELS_LIST_MAX_LIMIT: int = int(os.getenv("VESSELS_LIST_MAX_LIMIT", "100000"))
 
 # In-memory trail for route tracker: last N broadcast positions per MMSI (process-local).
 VESSEL_TRAIL_MAX_POINTS: int = int(os.getenv("VESSEL_TRAIL_MAX_POINTS", "200"))
+# Homepage ticker: recent successful broadcasts (process-local ring).
+VESSEL_TICKER_MAX_EVENTS: int = int(os.getenv("VESSEL_TICKER_MAX_EVENTS", "48"))
+VESSEL_TICKER_DEFAULT_LIMIT: int = int(os.getenv("VESSEL_TICKER_DEFAULT_LIMIT", "24"))
 
 # Optional: on first successful vessel broadcast after startup, write raw tx hex to this path
 # (ASCII, one line) for offline checks: POST https://api.whatsonchain.com/v1/bsv/main/tx/decode
@@ -270,6 +273,12 @@ def validate_config() -> list[str]:
         errors.append("BROADCAST_MOVING_SPEED_KN must be >= 0")
     if BROADCAST_POSITION_JUMP_NM < 0:
         errors.append("BROADCAST_POSITION_JUMP_NM must be >= 0")
+    if VESSEL_TICKER_MAX_EVENTS < 8:
+        errors.append("VESSEL_TICKER_MAX_EVENTS must be >= 8")
+    if VESSEL_TICKER_DEFAULT_LIMIT < 1:
+        errors.append("VESSEL_TICKER_DEFAULT_LIMIT must be >= 1")
+    elif VESSEL_TICKER_DEFAULT_LIMIT > VESSEL_TICKER_MAX_EVENTS:
+        errors.append("VESSEL_TICKER_DEFAULT_LIMIT must be <= VESSEL_TICKER_MAX_EVENTS")
 
     allowed_arc_wait = {
         "UNKNOWN",

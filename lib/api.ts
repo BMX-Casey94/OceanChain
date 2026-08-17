@@ -98,6 +98,47 @@ export async function fetchApiHealth(): Promise<ApiHealth | null> {
   }
 }
 
+export async function fetchRecentBroadcasts(limit = 24): Promise<TxEvent[]> {
+  const base = getApiBase()
+  if (!base) return []
+  const cap = Math.max(1, Math.min(48, Math.floor(limit)))
+  try {
+    const res = await fetch(`${base}/vessels/recent?limit=${cap}`, {
+      cache: "no-store",
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const rows = (data.vessels ?? data) as TxEvent[]
+    return Array.isArray(rows) ? rows : []
+  } catch {
+    return []
+  }
+}
+
+/** Homepage ticker seed: prefer /vessels/recent, else vessels that already have a tx. */
+export async function fetchTickerBroadcasts(limit = 24): Promise<TxEvent[]> {
+  const recent = await fetchRecentBroadcasts(limit)
+  if (recent.length > 0) return recent
+  try {
+    const vessels = await fetchVessels({ limit: 1500 })
+    return vessels
+      .filter((v) => Boolean(v.last_txid))
+      .slice(0, limit)
+      .map((v) => ({
+        txid: String(v.last_txid),
+        mmsi: v.mmsi,
+        vessel_name: v.name,
+        lat: v.lat,
+        lon: v.lon,
+        speed: v.speed,
+        timestamp: v.timestamp,
+        fee_sat: v.fee_sat ?? undefined,
+      }))
+  } catch {
+    return []
+  }
+}
+
 export async function fetchVessels(params?: {
   bbox?: string
   near?: string

@@ -7,7 +7,10 @@ Serialises the in-memory AIS snapshot for HTTP consumers (map + search).
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Optional
+from collections import deque
+from typing import Any, Callable, Deque, Optional
+
+from config import VESSEL_TICKER_MAX_EVENTS, VESSEL_TRAIL_MAX_POINTS
 
 SnapshotProvider = Callable[[], dict[str, dict[str, Any]]]
 
@@ -15,11 +18,46 @@ _snapshot_provider: Optional[SnapshotProvider] = None
 _last_tx_by_mmsi: dict[str, dict[str, Any]] = {}
 # Recent broadcast positions per MMSI for the route tracker (newest last).
 _trail_by_mmsi: dict[str, list[dict[str, Any]]] = {}
+# Newest-last ring of successful broadcasts for the homepage ticker (REST seed).
+_recent_broadcasts: Deque[dict[str, Any]] = deque(maxlen=VESSEL_TICKER_MAX_EVENTS)
 
 
 def set_vessel_snapshot_provider(provider: SnapshotProvider) -> None:
     global _snapshot_provider
     _snapshot_provider = provider
+
+
+def _ticker_row_from_event(tx_event: dict[str, Any]) -> Optional[dict[str, Any]]:
+    mmsi = str(tx_event.get("mmsi") or "").strip()
+    txid = str(tx_event.get("txid") or "").strip()
+    if not mmsi or not txid:
+        return None
+    try:
+        lat = float(tx_event.get("lat"))
+        lon = float(tx_event.get("lon"))
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    try:
+        speed = float(tx_event.get("speed") or 0.0)
+    except (TypeError, ValueError):
+        speed = 0.0
+    try:
+        timestamp = int(tx_event.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        timestamp = 0
+    return {
+        "txid": txid,
+        "mmsi": mmsi,
+        "vessel_name": (tx_event.get("vessel_name") or "").strip(),
+        "lat": lat,
+        "lon": lon,
+        "speed": speed,
+        "timestamp": timestamp,
+        "fee_sat": tx_event.get("fee_sat"),
+        "broadcaster": tx_event.get("broadcaster"),
+    }
 
 
 def record_vessel_tx(tx_event: dict[str, Any]) -> None:
@@ -32,6 +70,9 @@ def record_vessel_tx(tx_event: dict[str, Any]) -> None:
         "timestamp": tx_event.get("timestamp"),
         "broadcaster": tx_event.get("broadcaster"),
     }
+    row = _ticker_row_from_event(tx_event)
+    if row:
+        _recent_broadcasts.append(row)
     try:
         lat = float(tx_event.get("lat"))
         lon = float(tx_event.get("lon"))
@@ -39,7 +80,6 @@ def record_vessel_tx(tx_event: dict[str, Any]) -> None:
         return
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return
-    from config import VESSEL_TRAIL_MAX_POINTS
 
     trail = _trail_by_mmsi.setdefault(mmsi, [])
     trail.append(
@@ -61,6 +101,64 @@ def get_vessel_trail(mmsi: str) -> list[dict[str, Any]]:
 
 def get_last_tx(mmsi: str) -> Optional[dict[str, Any]]:
     return _last_tx_by_mmsi.get(mmsi)
+
+
+def list_recent_broadcasts(limit: int = 24) -> list[dict[str, Any]]:
+    """
+    Newest-first rows for the homepage ticker.
+
+    Prefers the ordered ring of live broadcasts. If that ring is empty
+    (process just started, or no TX since deploy), fall back to last-known
+    per-MMSI writes joined to the AIS snapshot.
+    """
+    cap = max(1, min(int(limit), VESSEL_TICKER_MAX_EVENTS))
+    if _recent_broadcasts:
+        items = list(_recent_broadcasts)
+        items.reverse()
+        return items[:cap]
+
+    snapshot = get_snapshot()
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for mmsi, last in _last_tx_by_mmsi.items():
+        txid = str(last.get("txid") or "").strip()
+        if not txid:
+            continue
+        pos = snapshot.get(mmsi) or {}
+        try:
+            lat = float(pos.get("latitude") or 0.0)
+            lon = float(pos.get("longitude") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+            continue
+        try:
+            ts = int(last.get("timestamp") or pos.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        try:
+            speed = float(pos.get("speed") or 0.0)
+        except (TypeError, ValueError):
+            speed = 0.0
+        ranked.append(
+            (
+                ts,
+                {
+                    "txid": txid,
+                    "mmsi": mmsi,
+                    "vessel_name": (pos.get("ship_name") or "").strip(),
+                    "lat": lat,
+                    "lon": lon,
+                    "speed": speed,
+                    "timestamp": ts,
+                    "fee_sat": last.get("fee_sat"),
+                    "broadcaster": last.get("broadcaster"),
+                },
+            )
+        )
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in ranked[:cap]]
 
 
 def _heading_public(raw: Any) -> Optional[int]:

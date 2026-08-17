@@ -28,6 +28,8 @@ from config import (
     VESSEL_SEARCH_RATE_WINDOW_SECONDS,
     VESSELS_LIST_DEFAULT_LIMIT,
     VESSELS_LIST_MAX_LIMIT,
+    VESSEL_TICKER_DEFAULT_LIMIT,
+    VESSEL_TICKER_MAX_EVENTS,
     VPS_API_PORT,
 )
 from utxo_manager import utxo_manager
@@ -35,6 +37,7 @@ from vessel_api import (
     get_snapshot,
     get_vessel,
     get_vessel_trail,
+    list_recent_broadcasts,
     list_vessels,
     record_vessel_tx,
     search_vessels,
@@ -296,6 +299,15 @@ async def vessels_search(
         return limited
     results = search_vessels(q, limit=limit)
     return JSONResponse({"query": q.strip(), "count": len(results), "results": results})
+
+
+@app.get("/vessels/recent")
+async def vessels_recent(
+    limit: int = Query(VESSEL_TICKER_DEFAULT_LIMIT, ge=1, le=VESSEL_TICKER_MAX_EVENTS),
+) -> JSONResponse:
+    """Newest successful on-chain vessel writes for the homepage ticker."""
+    vessels = list_recent_broadcasts(limit)
+    return JSONResponse({"count": len(vessels), "vessels": vessels})
 
 
 @app.get("/vessels/{mmsi}")
