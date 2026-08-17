@@ -100,7 +100,11 @@ export function VesselPanel({
         <Row label="Last seen" value={when} />
         <Row
           label="Last Bitcoin tx"
-          value={vessel.last_txid ? `${vessel.last_txid.slice(0, 14)}…` : "Pending / unavailable"}
+          value={
+            vessel.last_txid
+              ? `0-conf · ${vessel.last_txid.slice(0, 16)}…`
+              : "Not broadcast yet"
+          }
         />
       </div>
 

@@ -81,6 +81,14 @@ export function LiveApp() {
       url.searchParams.set("mmsi", mmsi)
       window.history.replaceState({}, "", url.toString())
     }
+    void (async () => {
+      try {
+        const detail = await fetchVessel(mmsi)
+        if (detail) setVessels((prev) => upsertVessel(prev, detail))
+      } catch {
+        // list snapshot is enough if detail fails
+      }
+    })()
   }, [vessels])
 
   const toggleTrail = useCallback(async () => {

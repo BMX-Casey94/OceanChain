@@ -80,7 +80,7 @@ def serialise_vessel(mmsi: str, position: dict[str, Any]) -> dict[str, Any]:
         "name": (position.get("ship_name") or "").strip(),
         "call_sign": (position.get("call_sign") or "").strip(),
         "destination": (position.get("destination") or "").strip(),
-        "imo": (position.get("imo") or "").strip(),
+        "imo": "" if str(position.get("imo") or "").strip() in {"", "0"} else str(position.get("imo")).strip(),
         "ship_type": position.get("ship_type"),
         "lat": float(position.get("latitude") or 0.0),
         "lon": float(position.get("longitude") or 0.0),

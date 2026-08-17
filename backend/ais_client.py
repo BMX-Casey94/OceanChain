@@ -33,12 +33,17 @@ SOURCE_DETAIL_RANK: dict[str, int] = {
 }
 
 
+def _ais_clean(value: str) -> str:
+    """AIS 6-bit strings are often '@'-padded; treat that as empty."""
+    return value.replace("@", " ").strip()
+
+
 def _meta_str(meta: dict[str, Any], *keys: str, max_len: int = 0) -> str:
     for k in keys:
         v = meta.get(k)
         if v is None or v == "":
             continue
-        s = str(v).strip()
+        s = _ais_clean(str(v))
         if not s:
             continue
         if max_len and len(s) > max_len:
@@ -141,13 +146,10 @@ def parse_ship_static(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     elif message_type == "StaticDataReport":
         raw = envelope.get("StaticDataReport")
         if isinstance(raw, dict):
-            body = raw
-            # Class B part B often nests Type under ReportB / PartB
-            for nest_key in ("ReportB", "PartB", "partB"):
-                nested = body.get(nest_key)
-                if isinstance(nested, dict):
-                    body = {**body, **nested}
-                    break
+            body = dict(raw)
+            report_a = body.get("ReportA") if isinstance(body.get("ReportA"), dict) else {}
+            report_b = body.get("ReportB") if isinstance(body.get("ReportB"), dict) else {}
+            body = {**body, **report_a, **report_b}
     else:
         return None
 
@@ -168,10 +170,16 @@ def parse_ship_static(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     )
     imo_raw = body.get("ImoNumber", body.get("IMO", metadata.get("ImoNumber")))
     imo = ""
-    if imo_raw not in (None, "", 0, "0"):
-        imo = str(imo_raw).strip()[:12]
+    try:
+        imo_n = int(imo_raw)
+    except (TypeError, ValueError):
+        imo_n = 0
+    if imo_n > 0:
+        imo = str(imo_n)
 
-    ship_type = _int_or_none(body.get("Type", body.get("ShipType", metadata.get("ShipType"))))
+    ship_type = _int_or_none(
+        body.get("Type", body.get("ShipType", metadata.get("ShipType")))
+    )
     if ship_type is not None and (ship_type < 0 or ship_type > 99):
         ship_type = None
 
