@@ -19,6 +19,7 @@ from config import (
     AISSTREAM_API_KEY,
     AISSTREAM_FILTER_MESSAGE_TYPES,
     AISSTREAM_WS_URL,
+    SUPPORTED_AIS_STATIC_MESSAGE_TYPES,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,88 @@ def _message_metadata(message: dict[str, Any]) -> dict[str, Any]:
         return meta
     meta = message.get("Metadata")
     return meta if isinstance(meta, dict) else {}
+
+
+def _int_or_none(raw: Any) -> Optional[int]:
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_ship_static(message: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    ShipStaticData / StaticDataReport → identity fields only (no lat/lon).
+
+    AIS type (Type) is the reliable source for silhouettes; PositionReport MetaData
+    often omits ShipType, which is why every vessel previously looked the same.
+    """
+    message_type = message.get("MessageType", "")
+    metadata = _message_metadata(message)
+    envelope = message.get("Message") if isinstance(message.get("Message"), dict) else {}
+    body: dict[str, Any] = {}
+    if message_type == "ShipStaticData":
+        raw = envelope.get("ShipStaticData")
+        if isinstance(raw, dict):
+            body = raw
+    elif message_type == "StaticDataReport":
+        raw = envelope.get("StaticDataReport")
+        if isinstance(raw, dict):
+            body = raw
+            # Class B part B often nests Type under ReportB / PartB
+            for nest_key in ("ReportB", "PartB", "partB"):
+                nested = body.get(nest_key)
+                if isinstance(nested, dict):
+                    body = {**body, **nested}
+                    break
+    else:
+        return None
+
+    mmsi = _mmsi_from_body(body, metadata)
+    if not mmsi:
+        return None
+
+    name = _meta_str(body, "Name", "ShipName") or _meta_str(
+        metadata, "ShipName", "shipName", max_len=48
+    )
+    if name and len(name) > 48:
+        name = name[:47] + "…"
+    call_sign = _meta_str(body, "CallSign", "Callsign") or _meta_str(
+        metadata, "CallSign", "Callsign", "callSign", max_len=12
+    )
+    destination = _meta_str(body, "Destination") or _meta_str(
+        metadata, "Destination", "destination", max_len=42
+    )
+    imo_raw = body.get("ImoNumber", body.get("IMO", metadata.get("ImoNumber")))
+    imo = ""
+    if imo_raw not in (None, "", 0, "0"):
+        imo = str(imo_raw).strip()[:12]
+
+    ship_type = _int_or_none(body.get("Type", body.get("ShipType", metadata.get("ShipType"))))
+    if ship_type is not None and (ship_type < 0 or ship_type > 99):
+        ship_type = None
+
+    return {
+        "mmsi": mmsi,
+        "ship_name": name,
+        "call_sign": call_sign,
+        "destination": destination,
+        "imo": imo,
+        "ship_type": ship_type,
+    }
+
+
+def _overlay_static(target: dict[str, Any], static: dict[str, Any]) -> dict[str, Any]:
+    """Fill blank identity fields from static AIS data; never overwrite a real value."""
+    out = dict(target)
+    if out.get("ship_type") is None and static.get("ship_type") is not None:
+        out["ship_type"] = static["ship_type"]
+    for key in ("ship_name", "call_sign", "destination", "imo"):
+        if not out.get(key) and static.get(key):
+            out[key] = static[key]
+    return out
 
 
 def _parse_position_report(message: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -261,6 +344,7 @@ class AISClient:
 
     def __init__(self) -> None:
         self._snapshot: dict[str, dict[str, Any]] = {}
+        self._static: dict[str, dict[str, Any]] = {}
         self._connected: bool = False
         self._reconnect_delay: float = 5.0
         self._message_count: int = 0
@@ -327,7 +411,28 @@ class AISClient:
             if ts_new == ts_old and rank_new < rank_old:
                 return
         out = {**position, "_ais_message_type": message_type}
+        if existing is not None:
+            out = _overlay_static(out, existing)
+        cached = self._static.get(mmsi)
+        if cached:
+            out = _overlay_static(out, cached)
         self._snapshot[mmsi] = out
+
+    def _ingest_static(self, message: dict[str, Any]) -> bool:
+        parsed = parse_ship_static(message)
+        if not parsed:
+            return False
+        mmsi = parsed["mmsi"]
+        prev = self._static.get(mmsi, {})
+        merged = _overlay_static(dict(prev), parsed)
+        merged["mmsi"] = mmsi
+        if parsed.get("ship_type") is not None:
+            merged["ship_type"] = parsed["ship_type"]
+        self._static[mmsi] = merged
+        existing = self._snapshot.get(mmsi)
+        if existing is not None:
+            self._snapshot[mmsi] = _overlay_static(existing, merged)
+        return True
 
     async def _handle_message(self, raw_message: str) -> None:
         try:
@@ -357,6 +462,18 @@ class AISClient:
                         "Ignoring AIS message type %r (filter=%s)",
                         message_type or "(empty)",
                         list(AISSTREAM_FILTER_MESSAGE_TYPES),
+                    )
+                return
+
+            if message_type in SUPPORTED_AIS_STATIC_MESSAGE_TYPES:
+                if self._ingest_static(message):
+                    self._message_count += 1
+                    self._last_message_time = datetime.utcnow()
+                elif self._frames_received <= 20:
+                    logger.warning(
+                        "Failed to parse %s frame #%s",
+                        message_type,
+                        self._frames_received,
                     )
                 return
 

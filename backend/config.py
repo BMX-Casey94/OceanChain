@@ -29,6 +29,16 @@ SUPPORTED_AIS_POSITION_MESSAGE_TYPES: frozenset[str] = frozenset(
         "LongRangeAisBroadcastMessage",
     }
 )
+# Static/voyage data — type, name, IMO, destination. Merged onto existing positions only.
+SUPPORTED_AIS_STATIC_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "ShipStaticData",
+        "StaticDataReport",
+    }
+)
+SUPPORTED_AIS_FILTER_MESSAGE_TYPES: frozenset[str] = (
+    SUPPORTED_AIS_POSITION_MESSAGE_TYPES | SUPPORTED_AIS_STATIC_MESSAGE_TYPES
+)
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -49,7 +59,10 @@ def _parse_aisstream_filter_message_types(raw: str) -> list[str]:
 
 
 AISSTREAM_FILTER_MESSAGE_TYPES: list[str] = _parse_aisstream_filter_message_types(
-    os.getenv("AISSTREAM_FILTER_MESSAGE_TYPES", "PositionReport").strip()
+    os.getenv(
+        "AISSTREAM_FILTER_MESSAGE_TYPES",
+        "PositionReport,ShipStaticData",
+    ).strip()
 )
 
 # BSV Wallet Configuration
@@ -260,10 +273,10 @@ def validate_config() -> list[str]:
         errors.append("GORILLA_TX_FORMAT must be one of: raw, ef, auto")
 
     for mt in AISSTREAM_FILTER_MESSAGE_TYPES:
-        if mt not in SUPPORTED_AIS_POSITION_MESSAGE_TYPES:
+        if mt not in SUPPORTED_AIS_FILTER_MESSAGE_TYPES:
             errors.append(
                 f"AISSTREAM_FILTER_MESSAGE_TYPES: unsupported type {mt!r} "
-                f"(supported: {', '.join(sorted(SUPPORTED_AIS_POSITION_MESSAGE_TYPES))})"
+                f"(supported: {', '.join(sorted(SUPPORTED_AIS_FILTER_MESSAGE_TYPES))})"
             )
 
     return errors
