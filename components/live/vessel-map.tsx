@@ -25,6 +25,8 @@ type VesselMapProps = {
   onAvailabilityChange?: (available: boolean) => void
   /** Route tracker polyline (oldest → newest), or null to hide. */
   trail?: TrailPoint[] | null
+  /** Bumps only on a full fleet replace — not on single-vessel upserts or selection. */
+  fleetRevision?: number
 }
 
 type WebGLStatus = "ok" | "webgl1-only" | "none"
@@ -166,6 +168,7 @@ export function VesselMap({
   pulseMmsi,
   onAvailabilityChange,
   trail = null,
+  fleetRevision = 0,
 }: VesselMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
@@ -384,27 +387,30 @@ export function VesselMap({
     if (!map) return
     const source = map.getSource("vessels") as GeoJSONSource | undefined
     if (!source) return
-    source.setData(toFeatureCollection(vessels))
+    source.setData(toFeatureCollection(vesselsRef.current))
+  }, [fleetRevision, vessels.length, mapError, sourceReady])
 
-    if (map.getLayer("vessel-points")) {
-      map.setPaintProperty("vessel-points", "circle-color", [
-        "case",
-        ["==", ["get", "mmsi"], selectedMmsi || ""],
-        "#5eead4",
-        ["==", ["get", "mmsi"], pulseMmsi || ""],
-        "#99f6e4",
-        "#14b8a6",
-      ])
-      map.setPaintProperty("vessel-points", "circle-radius", [
-        "case",
-        ["==", ["get", "mmsi"], selectedMmsi || ""],
-        7.5,
-        ["==", ["get", "mmsi"], pulseMmsi || ""],
-        6.5,
-        4.5,
-      ])
-    }
-  }, [vessels, selectedMmsi, pulseMmsi, mapError, sourceReady])
+  useEffect(() => {
+    if (!sourceReady || mapError) return
+    const map = mapRef.current
+    if (!map || !map.getLayer("vessel-points")) return
+    map.setPaintProperty("vessel-points", "circle-color", [
+      "case",
+      ["==", ["get", "mmsi"], selectedMmsi || ""],
+      "#5eead4",
+      ["==", ["get", "mmsi"], pulseMmsi || ""],
+      "#99f6e4",
+      "#14b8a6",
+    ])
+    map.setPaintProperty("vessel-points", "circle-radius", [
+      "case",
+      ["==", ["get", "mmsi"], selectedMmsi || ""],
+      7.5,
+      ["==", ["get", "mmsi"], pulseMmsi || ""],
+      6.5,
+      4.5,
+    ])
+  }, [selectedMmsi, pulseMmsi, mapError, sourceReady])
 
   useEffect(() => {
     if (!sourceReady || mapError) return

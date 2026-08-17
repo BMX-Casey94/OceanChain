@@ -35,6 +35,9 @@ import { trackEvent } from "@/lib/analytics"
 
 type ConnState = "connecting" | "connected" | "reconnecting" | "limited" | "offline"
 
+/** Search / deep-link camera target — wide enough to keep neighbouring vessels in view. */
+const SEARCH_FLY_ZOOM = 7
+
 function upsertVessel(list: VesselSummary[], next: VesselSummary): VesselSummary[] {
   const idx = list.findIndex((v) => v.mmsi === next.mmsi)
   if (idx === -1) return [next, ...list].slice(0, 20000)
@@ -61,6 +64,7 @@ export function LiveApp() {
   const [showTrail, setShowTrail] = useState(false)
   const [trail, setTrail] = useState<TrailPoint[] | null>(null)
   const [trailLoading, setTrailLoading] = useState(false)
+  const [fleetRevision, setFleetRevision] = useState(0)
 
   const selected = useMemo(
     () => vessels.find((v) => v.mmsi === selectedMmsi) ?? null,
@@ -74,7 +78,7 @@ export function LiveApp() {
     trackEvent("vessel_opened", { mmsi })
     const match = vessels.find((v) => v.mmsi === mmsi)
     if (fly && match) {
-      setFlyTo({ lon: match.lon, lat: match.lat, zoom: 10, key: Date.now() })
+      setFlyTo({ lon: match.lon, lat: match.lat, zoom: SEARCH_FLY_ZOOM, key: Date.now() })
     }
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href)
@@ -133,6 +137,7 @@ export function LiveApp() {
             : { limit: 100000 }
       )
       setVessels(data)
+      setFleetRevision((n) => n + 1)
       setConn((c) => (c === "offline" ? c : "connected"))
     } catch {
       setError(
@@ -234,7 +239,7 @@ export function LiveApp() {
             setFlyTo({
               lon: detail.lon,
               lat: detail.lat,
-              zoom: 10,
+              zoom: SEARCH_FLY_ZOOM,
               key: Date.now(),
             })
           } else {
@@ -258,7 +263,7 @@ export function LiveApp() {
             setFlyTo({
               lon: hits[0].lon,
               lat: hits[0].lat,
-              zoom: 10,
+              zoom: SEARCH_FLY_ZOOM,
               key: Date.now(),
             })
           }
@@ -342,7 +347,7 @@ export function LiveApp() {
       setFlyTo({
         lon: selection.vessel.lon,
         lat: selection.vessel.lat,
-        zoom: 10,
+        zoom: SEARCH_FLY_ZOOM,
         key: Date.now(),
       })
       const url = new URL(window.location.href)
@@ -389,8 +394,9 @@ export function LiveApp() {
       <VesselMap
         vessels={vessels}
         selectedMmsi={selectedMmsi}
-        onSelect={(mmsi) => selectVessel(mmsi)}
+        onSelect={(mmsi) => selectVessel(mmsi, false)}
         flyTo={flyTo}
+        fleetRevision={fleetRevision}
         pulseMmsi={pulseMmsi}
         onAvailabilityChange={(available) => setChartUnavailable(!available)}
         trail={showTrail ? trail : null}
