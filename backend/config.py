@@ -87,10 +87,13 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/
 # Each vessel tx spends one pool UTXO; fee is only tens–low hundreds of sats at typical sizes/rates.
 # Smaller UTXO_VALUE_EACH + higher UTXO_POOL_TARGET = less capital locked, more rows (fan-out needs
 # one wallet input covering TARGET × VALUE_EACH + fan-out fee).
-# Target spendable pool size. Sustained tx/s ≈ pool_depth / ARC latency; policy scheduler
-# needs several thousand slots for ~100+ tx/s with ~5s ARC round-trips.
-UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "5000"))
-UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "3000"))
+# Target spendable pool size. At ~1.2s ARC and 450 concurrency, a few hundred
+# live coins is enough; 5000 × 10000 sat is a 0.5 BSV fan-out we do not want
+# to fire accidentally after a crash.
+UTXO_POOL_TARGET: int = int(os.getenv("UTXO_POOL_TARGET", "400"))
+# Larger change survives more chained hops before decaying below the dust floor.
+# At ~36 sat/tx and 30 tx/s, 3000 sat dies in ~65 hops (~2 min); 10000 sat lasts ~270 hops.
+UTXO_VALUE_EACH: int = int(os.getenv("UTXO_VALUE_EACH", "10000"))
 MIN_CHANGE_OUTPUT_SAT: int = int(os.getenv("MIN_CHANGE_OUTPUT_SAT", "1"))
 # If true, run one fan-out from the funded wallet when the pool is empty at startup.
 UTXO_AUTO_REFILL_ON_START: bool = os.getenv("UTXO_AUTO_REFILL_ON_START", "0").strip().lower() in (

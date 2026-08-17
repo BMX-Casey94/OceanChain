@@ -267,6 +267,20 @@ async def process_vessel(
             logger.debug("Broadcast failed for %s: %s", label, e)
             if e.tx_was_submitted:
                 await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
+                # The tx was submitted to at least one ARC endpoint. Its change output
+                # (index 1) is ours; track it so the pool does not silently drain even
+                # though the final status was never confirmed. If the tx never lands,
+                # this row is inert and can be cleaned up later.
+                try:
+                    txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
+                    if txid_canon:
+                        await utxo_manager.add_utxo(txid_canon, 1, change_value)
+                except Exception as add_err:
+                    logger.warning(
+                        "Could not record change for unconfirmed tx %s: %s",
+                        utxo["txid"][:16],
+                        add_err,
+                    )
                 logger.debug(
                     "Consumed UTXO %s:%s after failed broadcast (tx was submitted, "
                     "releasing would risk double-spend)",

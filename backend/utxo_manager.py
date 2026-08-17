@@ -103,9 +103,19 @@ class UTXOManager:
                 ON utxos (value_sat DESC)
                 WHERE locked = FALSE AND utxo_role = 'reserve'
             """)
+            await conn.execute("""
+                ALTER TABLE utxos ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ
+            """)
 
         self._initialized = True
         logger.info("UTXO manager initialized")
+
+        # A previous crashed process can leave rows locked with no broadcast in flight.
+        # Unlock anything locked longer than 2 minutes, plus pre-column leftovers.
+        try:
+            await self.sweep_stale_locks(older_than_seconds=120)
+        except Exception as e:
+            logger.warning("Could not sweep stale UTXO locks on startup: %s", e)
 
     async def acquire_utxo(self) -> Optional[dict[str, Any]]:
         """
@@ -127,7 +137,7 @@ class UTXOManager:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                UPDATE utxos SET locked = TRUE
+                UPDATE utxos SET locked = TRUE, locked_at = NOW()
                 WHERE (txid, vout) = (
                     SELECT txid, vout FROM utxos
                     WHERE locked = FALSE AND utxo_role = 'pool' AND value_sat >= $1
@@ -162,8 +172,8 @@ class UTXOManager:
 
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE utxos SET locked = FALSE WHERE txid = $1 AND vout = $2 "
-                "AND utxo_role = 'pool'",
+                "UPDATE utxos SET locked = FALSE, locked_at = NULL "
+                "WHERE txid = $1 AND vout = $2 AND utxo_role = 'pool'",
                 txid,
                 vout,
             )
@@ -189,6 +199,44 @@ class UTXOManager:
 
         logger.debug(f"Consumed UTXO {txid}:{vout}")
 
+    async def sweep_stale_locks(self, older_than_seconds: int = 300) -> int:
+        """
+        Unlock pool rows that have been locked longer than the cutoff.
+
+        A crashed or restarted process can leave rows locked even though no
+        broadcast is in flight. Only call this when the engine is known to be
+        idle (startup) or from the monitor loop with a generous cutoff.
+
+        Returns:
+            Number of rows unlocked.
+        """
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE utxos
+                SET locked = FALSE, locked_at = NULL
+                WHERE utxo_role = 'pool'
+                  AND locked = TRUE
+                  AND (
+                    locked_at IS NULL
+                    OR locked_at < NOW() - ($1 * INTERVAL '1 second')
+                  )
+                """,
+                older_than_seconds,
+            )
+
+        # asyncpg returns e.g. "UPDATE 123"
+        try:
+            count = int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            count = 0
+        if count:
+            logger.warning("Unlocked %s stale pool UTXO(s) older than %ss", count, older_than_seconds)
+        return count
+
     async def add_utxo(
         self,
         txid: str,
@@ -209,6 +257,20 @@ class UTXOManager:
             raise RuntimeError("UTXO manager not initialized")
         if utxo_role not in (UTXO_ROLE_POOL, UTXO_ROLE_RESERVE):
             raise ValueError(f"Invalid utxo_role: {utxo_role}")
+
+        if utxo_role == UTXO_ROLE_POOL:
+            from tx_builder import minimum_viable_utxo_value
+
+            floor = minimum_viable_utxo_value()
+            if value_sat < floor:
+                logger.info(
+                    "Not tracking dust change %s:%s (%s sat < %s sat floor)",
+                    txid[:16],
+                    vout,
+                    value_sat,
+                    floor,
+                )
+                return
 
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -763,6 +825,11 @@ class UTXOManager:
         while True:
             try:
                 await asyncio.sleep(60)
+
+                try:
+                    await self.sweep_stale_locks(older_than_seconds=120)
+                except Exception as sweep_err:
+                    logger.warning("Stale lock sweep failed: %s", sweep_err)
 
                 metrics = await self.pool_metrics()
                 depth_threshold = max(1, UTXO_POOL_TARGET // 2)
