@@ -103,7 +103,7 @@ DB_POOL_MAX_SIZE: int = int(os.getenv("DB_POOL_MAX_SIZE", "5"))
 # Broadcasting Configuration
 BATCH_INTERVAL_SECONDS: int = int(os.getenv("BATCH_INTERVAL_SECONDS", "10"))
 # Max concurrent vessel broadcasts (ARC + DB per task). Tune via env if ARC/Postgres show strain.
-BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "250"))
+BROADCAST_CONCURRENCY: int = int(os.getenv("BROADCAST_CONCURRENCY", "450"))
 # App-side ARC target status. The broadcaster submits first, then polls GET /tx/{txid}
 # until this lifecycle state is reached before counting the tx as successful.
 ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "SEEN_ON_NETWORK").strip().upper()
