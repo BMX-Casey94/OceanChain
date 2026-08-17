@@ -130,7 +130,11 @@ BROADCAST_MOVING_SPEED_KN: float = float(os.getenv("BROADCAST_MOVING_SPEED_KN", 
 BROADCAST_POSITION_JUMP_NM: float = float(os.getenv("BROADCAST_POSITION_JUMP_NM", "0.25"))
 # App-side ARC target status. The broadcaster submits first, then polls GET /tx/{txid}
 # until this lifecycle state is reached before counting the tx as successful.
-ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "SEEN_ON_NETWORK").strip().upper()
+# ACCEPTED_BY_NETWORK = a network node has accepted the tx into its mempool; waiting
+# for SEEN_ON_NETWORK instead roughly doubles-to-triples per-tx latency and caps
+# throughput near ~8-10 tx/s at 450 concurrency. Change outputs are respent
+# unconfirmed under either setting (zero-conf chaining; EF carries parent data).
+ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "ACCEPTED_BY_NETWORK").strip().upper()
 # Maximum seconds to wait for ARC status polling before retry/failover.
 ARC_MAX_TIMEOUT_SECONDS: int = int(os.getenv("ARC_MAX_TIMEOUT_SECONDS", "10"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.

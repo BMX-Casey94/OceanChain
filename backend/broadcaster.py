@@ -21,6 +21,7 @@ from config import (
     ARC_WAIT_FOR_STATUS,
     VERBOSE_ARC_LOGS,
 )
+from broadcast_stats import broadcast_stats
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,16 @@ def _arc_detail(msg: str, *args: Any) -> None:
         logger.info(msg, *args)
     else:
         logger.debug(msg, *args)
+
+
+async def _record_arc_attempt(broadcaster_name: str, start: float, success: bool) -> None:
+    """Record endpoint attempt stats; accounting must never break broadcasting."""
+    try:
+        await broadcast_stats.record_arc_attempt(
+            broadcaster_name, success, (time.monotonic() - start) * 1000
+        )
+    except Exception:
+        pass
 
 
 class BroadcastError(Exception):
@@ -514,15 +525,19 @@ async def submit(
 
         if gorilla_submit_enabled:
             # Attempt 1: GorillaPool (no API key needed)
+            attempt_start = time.monotonic()
             try:
                 tx_was_submitted = True
-                return await _submit_to_arc(
+                result = await _submit_to_arc(
                     client,
                     GORILLA_ARC_URL,
                     selected_gorilla_tx_hex,
                     "gorillapool",
                 )
+                await _record_arc_attempt("gorillapool", attempt_start, True)
+                return result
             except BroadcastError as e:
+                await _record_arc_attempt("gorillapool", attempt_start, False)
                 gorilla_error = _safe_exc_text(e)
                 if any(s in gorilla_error for s in ("terminal failure", "REJECTED", "DOUBLE_SPEND")):
                     gorilla_terminal = True
@@ -533,32 +548,41 @@ async def submit(
                 else:
                     _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
             except Exception as e:
+                await _record_arc_attempt("gorillapool", attempt_start, False)
                 gorilla_error = _safe_exc_text(e)
                 _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
 
             if not gorilla_terminal:
                 await asyncio.sleep(2.0)
                 # Attempt 2: GorillaPool retry (only for non-terminal failures)
+                attempt_start = time.monotonic()
                 try:
                     tx_was_submitted = True
-                    return await _submit_to_arc(
+                    result = await _submit_to_arc(
                         client,
                         GORILLA_ARC_URL,
                         selected_gorilla_tx_hex,
                         "gorillapool",
                     )
+                    await _record_arc_attempt("gorillapool", attempt_start, True)
+                    return result
                 except Exception as e:
+                    await _record_arc_attempt("gorillapool", attempt_start, False)
                     gorilla_error = _safe_exc_text(e)
                     _arc_detail("GorillaPool attempt 2 failed: %s", gorilla_error)
-        
+
         # TAAL fallback when configured
         if TAAL_API_KEY:
+            attempt_start = time.monotonic()
             try:
                 tx_was_submitted = True
-                return await _submit_to_arc(
+                result = await _submit_to_arc(
                     client, TAAL_ARC_URL, raw_tx_hex, "taal", api_key=TAAL_API_KEY
                 )
+                await _record_arc_attempt("taal", attempt_start, True)
+                return result
             except Exception as e:
+                await _record_arc_attempt("taal", attempt_start, False)
                 taal_error = _safe_exc_text(e)
                 _arc_detail("TAAL fallback failed: %s", taal_error)
     

@@ -287,11 +287,18 @@ async def process_vessel(
 async def broadcasting_loop() -> None:
     """
     Main broadcasting loop.
-    
-    Every BATCH_INTERVAL_SECONDS:
+
+    Each pass:
     1. Get current vessel snapshot from AIS client
-    2. Process all vessels concurrently (capped at BROADCAST_CONCURRENCY in-flight)
-    3. Log batch statistics
+    2. Select due vessels (policy scheduler), longest-waiting first
+    3. Attempt at most BROADCAST_CONCURRENCY of them concurrently
+
+    The due set is deliberately sliced, not gathered whole: after a pool outage
+    tens of thousands of vessels are due at once, and awaiting all of them in a
+    single gather blocks the loop until the last ARC poll finishes — capping
+    throughput far below what the pool and concurrency allow. When a backlog
+    exists, passes run back-to-back; when caught up, the loop sleeps
+    BATCH_INTERVAL_SECONDS between passes.
     """
     logger.info(
         "Broadcasting loop starting, tick: %ss, concurrency: %s, moving: %ss, stationary: %ss",
@@ -313,20 +320,18 @@ async def broadcasting_loop() -> None:
         try:
             # Wait for pause to clear
             await app_state.pause_event.wait()
-            
-            # Sleep until next batch
-            await asyncio.sleep(BATCH_INTERVAL_SECONDS)
-            
-            # Check pause again after sleep
+
             if app_state.paused:
+                await asyncio.sleep(BATCH_INTERVAL_SECONDS)
                 continue
-            
+
             # Get current snapshot
             snapshot = ais_client.get_current_snapshot()
             vessel_count = len(snapshot)
 
             if vessel_count == 0:
                 logger.debug("No vessels in snapshot, skipping batch")
+                await asyncio.sleep(BATCH_INTERVAL_SECONDS)
                 continue
 
             update_vessel_count(vessel_count)
@@ -341,6 +346,7 @@ async def broadcasting_loop() -> None:
                     vessel_count,
                     VPS_API_PORT,
                 )
+                await asyncio.sleep(BATCH_INTERVAL_SECONDS)
                 continue
 
             now = time.time()
@@ -351,17 +357,25 @@ async def broadcasting_loop() -> None:
             ]
             due_count = len(due_items)
 
+            if due_count == 0:
+                await asyncio.sleep(BATCH_INTERVAL_SECONDS)
+                continue
+
+            # Longest-waiting first; never-broadcast vessels (due=0) ahead of all.
+            due_items.sort(key=lambda item: _next_due_by_mmsi.get(item[0], 0.0))
+
+            # Attempt at most BROADCAST_CONCURRENCY vessels this pass. Vessels
+            # past the slice stay due and are picked up on the next pass.
+            batch = due_items[:BROADCAST_CONCURRENCY]
+
             logger.debug(
-                "Scheduler: %s vessels in snapshot, %s due (pool depth %s)",
+                "Scheduler: %s vessels in snapshot, %s due, attempting %s (pool depth %s)",
                 vessel_count,
                 due_count,
+                len(batch),
                 pool_ready,
             )
 
-            if due_count == 0:
-                continue
-
-            # Process due vessels concurrently with semaphore
             semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
 
             async def run_one(mmsi: str, position: dict[str, Any]) -> bool:
@@ -375,11 +389,11 @@ async def broadcasting_loop() -> None:
                 _mark_attempt(mmsi, position, now, ok)
                 return ok
 
-            tasks = [run_one(mmsi, position) for mmsi, position in due_items]
+            tasks = [run_one(mmsi, position) for mmsi, position in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             successes = sum(1 for r in results if r is True)
-            failures = due_count - successes
+            failures = len(batch) - successes
             task_errors = [r for r in results if isinstance(r, BaseException)]
             for err in task_errors:
                 if isinstance(err, asyncio.CancelledError):
@@ -388,11 +402,17 @@ async def broadcasting_loop() -> None:
                 logger.error("Batch task exception: %s", err, exc_info=err)
 
             logger.debug(
-                "Batch complete: %s/%s due ok, %s failed",
+                "Batch complete: %s/%s attempted ok, %s failed, %s still due",
                 successes,
-                due_count,
+                len(batch),
                 failures,
+                due_count - len(batch),
             )
+
+            # Backlog remains: start the next slice immediately rather than
+            # sleeping a full tick. Fully caught up: normal cadence.
+            if due_count <= len(batch):
+                await asyncio.sleep(BATCH_INTERVAL_SECONDS)
         
         except asyncio.CancelledError:
             logger.info("Broadcasting loop shutdown")
@@ -420,10 +440,25 @@ async def log_summary_loop() -> None:
             avg_fee = (
                 snap["fees_sat"] / snap["ok"] if snap["ok"] else 0.0
             )
+            g_att = snap["arc_attempts"].get("gorillapool", 0)
+            g_ok = snap["arc_success"].get("gorillapool", 0)
+            t_att = snap["arc_attempts"].get("taal", 0)
+            t_ok = snap["arc_success"].get("taal", 0)
+            g_avg = (
+                snap["arc_latency_ms"].get("gorillapool", 0.0) / g_att / 1000.0
+                if g_att
+                else 0.0
+            )
+            t_avg = (
+                snap["arc_latency_ms"].get("taal", 0.0) / t_att / 1000.0
+                if t_att
+                else 0.0
+            )
             logger.info(
                 "Summary (%ss): broadcasts ok=%s fail=%s "
                 "(arc=%s no_utxo=%s other=%s) avg_fee_sat=%.2f "
-                "pool_depth=%s ais_vessels=%s ais_msgs_total=%s",
+                "pool_depth=%s ais_vessels=%s ais_msgs_total=%s "
+                "gorilla=%s/%s %.1fs taal=%s/%s %.1fs",
                 LOG_SUMMARY_INTERVAL_SECONDS,
                 snap["ok"],
                 total_fail,
@@ -434,6 +469,12 @@ async def log_summary_loop() -> None:
                 pool,
                 vessels,
                 msgs,
+                g_ok,
+                g_att,
+                g_avg,
+                t_ok,
+                t_att,
+                t_avg,
             )
             if snap["ok_samples"]:
                 logger.info("Sample ok: %s", " · ".join(snap["ok_samples"]))

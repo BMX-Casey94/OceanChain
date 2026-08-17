@@ -22,6 +22,11 @@ class BroadcastStats:
         self.fees_sat_window = 0
         self._ok_samples: Deque[str] = deque(maxlen=max_samples)
         self._fail_samples: Deque[str] = deque(maxlen=max_samples)
+        # Per-ARC-endpoint accounting: attempts, successes, cumulative latency.
+        # Answers "is Gorilla actually succeeding, and how long does each path take?"
+        self.arc_attempts: dict[str, int] = {}
+        self.arc_success: dict[str, int] = {}
+        self.arc_latency_ms: dict[str, float] = {}
 
     async def record_ok(self, label: str, fee_sat: int) -> None:
         async with self._lock:
@@ -45,6 +50,18 @@ class BroadcastStats:
             r = (reason or "")[:100].replace("\n", " ")
             self._fail_samples.append(f"{label} | {r}")
 
+    async def record_arc_attempt(
+        self, broadcaster: str, success: bool, latency_ms: float
+    ) -> None:
+        """Record one finished ARC endpoint attempt (submit + any status polling)."""
+        async with self._lock:
+            self.arc_attempts[broadcaster] = self.arc_attempts.get(broadcaster, 0) + 1
+            if success:
+                self.arc_success[broadcaster] = self.arc_success.get(broadcaster, 0) + 1
+            self.arc_latency_ms[broadcaster] = (
+                self.arc_latency_ms.get(broadcaster, 0.0) + latency_ms
+            )
+
     async def drain_window(self) -> dict[str, Any]:
         async with self._lock:
             snap = {
@@ -55,6 +72,9 @@ class BroadcastStats:
                 "fees_sat": self.fees_sat_window,
                 "ok_samples": list(self._ok_samples),
                 "fail_samples": list(self._fail_samples),
+                "arc_attempts": dict(self.arc_attempts),
+                "arc_success": dict(self.arc_success),
+                "arc_latency_ms": dict(self.arc_latency_ms),
             }
             self.ok = 0
             self.fail_broadcast = 0
@@ -63,6 +83,9 @@ class BroadcastStats:
             self.fees_sat_window = 0
             self._ok_samples.clear()
             self._fail_samples.clear()
+            self.arc_attempts.clear()
+            self.arc_success.clear()
+            self.arc_latency_ms.clear()
             return snap
 
 
