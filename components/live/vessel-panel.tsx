@@ -70,24 +70,14 @@ export function VesselPanel({
           </p>
           <h2 className="font-heading text-2xl tracking-wide text-white leading-tight">{title}</h2>
         </div>
-        <div className="flex items-start gap-1 shrink-0">
-          <div className="w-40 opacity-90">
-            <VesselSilhouette
-              shipType={vessel.ship_type}
-              name={vessel.name}
-              lengthM={vessel.length_m}
-              beamM={vessel.beam_m}
-            />
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-2 text-white/50 hover:text-white transition-colors"
-            aria-label="Close vessel panel"
-          >
-            <X size={18} />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="p-2 text-white/50 hover:text-white transition-colors shrink-0"
+          aria-label="Close vessel panel"
+        >
+          <X size={18} />
+        </button>
       </div>
 
       <div className="space-y-0">
@@ -113,7 +103,16 @@ export function VesselPanel({
         />
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-4 mb-1 flex justify-center opacity-90" aria-hidden="true">
+        <VesselSilhouette
+          shipType={vessel.ship_type}
+          name={vessel.name}
+          lengthM={vessel.length_m}
+          beamM={vessel.beam_m}
+        />
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
         {onToggleTrail && (
           <button
             type="button"
