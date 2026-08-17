@@ -74,7 +74,7 @@ export function LiveApp() {
     trackEvent("vessel_opened", { mmsi })
     const match = vessels.find((v) => v.mmsi === mmsi)
     if (fly && match) {
-      setFlyTo({ lon: match.lon, lat: match.lat, zoom: 8, key: Date.now() })
+      setFlyTo({ lon: match.lon, lat: match.lat, zoom: 10, key: Date.now() })
     }
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href)
@@ -213,7 +213,7 @@ export function LiveApp() {
             setFlyTo({
               lon: detail.lon,
               lat: detail.lat,
-              zoom: 8,
+              zoom: 10,
               key: Date.now(),
             })
           } else {
@@ -237,7 +237,7 @@ export function LiveApp() {
             setFlyTo({
               lon: hits[0].lon,
               lat: hits[0].lat,
-              zoom: 8,
+              zoom: 10,
               key: Date.now(),
             })
           }
@@ -321,7 +321,7 @@ export function LiveApp() {
       setFlyTo({
         lon: selection.vessel.lon,
         lat: selection.vessel.lat,
-        zoom: 8,
+        zoom: 10,
         key: Date.now(),
       })
       const url = new URL(window.location.href)

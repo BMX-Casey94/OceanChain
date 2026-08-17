@@ -284,6 +284,35 @@ export function VesselMap({
         },
       })
 
+      // Selected vessel sits above clusters so search hits stay visible in a crowd.
+      map.addSource("selected-vessel", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      })
+      map.addLayer({
+        id: "selected-vessel-pulse",
+        type: "circle",
+        source: "selected-vessel",
+        paint: {
+          "circle-color": "#fbbf24",
+          "circle-radius": 16,
+          "circle-opacity": 0.22,
+          "circle-blur": 0.35,
+        },
+      })
+      map.addLayer({
+        id: "selected-vessel-core",
+        type: "circle",
+        source: "selected-vessel",
+        paint: {
+          "circle-color": "#f59e0b",
+          "circle-radius": 7,
+          "circle-stroke-width": 2.4,
+          "circle-stroke-color": "#fffbeb",
+          "circle-opacity": 1,
+        },
+      })
+
       map.addSource("vessel-trail", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -376,6 +405,50 @@ export function VesselMap({
       ])
     }
   }, [vessels, selectedMmsi, pulseMmsi, mapError, sourceReady])
+
+  useEffect(() => {
+    if (!sourceReady || mapError) return
+    const map = mapRef.current
+    if (!map) return
+    const source = map.getSource("selected-vessel") as GeoJSONSource | undefined
+    if (!source) return
+    const selected = selectedMmsi
+      ? vessels.find((v) => v.mmsi === selectedMmsi)
+      : undefined
+    if (!selected || !Number.isFinite(selected.lat) || !Number.isFinite(selected.lon)) {
+      source.setData({ type: "FeatureCollection", features: [] })
+      return
+    }
+    source.setData({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: { mmsi: selected.mmsi },
+          geometry: { type: "Point", coordinates: [selected.lon, selected.lat] },
+        },
+      ],
+    })
+  }, [vessels, selectedMmsi, mapError, sourceReady])
+
+  useEffect(() => {
+    if (!sourceReady || mapError || !selectedMmsi) return
+    const map = mapRef.current
+    if (!map || !map.getLayer("selected-vessel-pulse")) return
+    let frame = 0
+    const tick = (now: number) => {
+      const wave = (Math.sin(now / 320) + 1) / 2
+      try {
+        map.setPaintProperty("selected-vessel-pulse", "circle-radius", 11 + wave * 16)
+        map.setPaintProperty("selected-vessel-pulse", "circle-opacity", 0.32 - wave * 0.24)
+      } catch {
+        // layer may be gone during teardown
+      }
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [selectedMmsi, mapError, sourceReady])
 
   useEffect(() => {
     if (!sourceReady || mapError) return
