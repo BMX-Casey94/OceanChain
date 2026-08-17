@@ -44,9 +44,18 @@ export function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "")
 }
 
+/**
+ * WebSocket URL for live tx events.
+ * Same-origin HTTP rewrites (/ocechain-api) cannot upgrade WebSockets — set
+ * NEXT_PUBLIC_WS_URL to ws(s)://host:port/ws when using the proxy for REST.
+ */
 export function getWsUrl(): string {
+  const explicit = (process.env.NEXT_PUBLIC_WS_URL || "").trim().replace(/\/$/, "")
+  if (explicit) return explicit
+
   const base = getApiBase()
   if (!base) return ""
+  if (base.startsWith("/")) return ""
   if (base.startsWith("https://")) return `${base.replace(/^https/, "wss")}/ws`
   if (base.startsWith("http://")) return `${base.replace(/^http/, "ws")}/ws`
   return ""

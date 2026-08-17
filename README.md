@@ -53,7 +53,9 @@ ocechain/
 | Variable | Description |
 |----------|-------------|
 | `NEXT_PUBLIC_SITE_URL` | Canonical site URL (e.g. `https://ocechain.com`) |
-| `NEXT_PUBLIC_API_BASE` | Backend API origin (e.g. `https://api.example.com`) |
+| `NEXT_PUBLIC_API_BASE` | Browser API origin. Prefer `/ocechain-api` on Vercel (same-origin proxy). Local: `http://localhost:8000` |
+| `API_PROXY_TARGET` | Server-only rewrite target for `/ocechain-api/*` (e.g. `http://185.249.72.134:8000`) |
+| `NEXT_PUBLIC_WS_URL` | Optional explicit `ws(s)://…/ws` when REST uses the proxy (needs `wss://` from HTTPS) |
 | `NEXT_PUBLIC_ENTERPRISE_EMAIL` | Enterprise mailto target |
 
 Copy [`.env.example`](.env.example) to `.env.local` for local development.

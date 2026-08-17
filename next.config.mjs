@@ -1,10 +1,26 @@
 /** @type {import('next').NextConfig} */
+const apiProxyTarget = (
+  process.env.API_PROXY_TARGET ||
+  process.env.NEXT_PUBLIC_API_PROXY_TARGET ||
+  "http://185.249.72.134:8000"
+).replace(/\/$/, "")
+
 const nextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
   images: {
     unoptimized: true,
+  },
+  async rewrites() {
+    // Browser → same-origin /ocechain-api/* → Vercel edge proxies to the VPS.
+    // Avoids mixed-content blocks when the site is HTTPS and the API is HTTP.
+    return [
+      {
+        source: "/ocechain-api/:path*",
+        destination: `${apiProxyTarget}/:path*`,
+      },
+    ]
   },
   async headers() {
     return [
@@ -26,7 +42,8 @@ const nextConfig = {
               "style-src 'self' 'unsafe-inline' https://basemaps.cartocdn.com https://unpkg.com",
               "img-src 'self' data: blob: https:",
               "font-src 'self' data: https://fonts.gstatic.com",
-              "connect-src 'self' https: wss: http://localhost:8000 ws://localhost:8000",
+              // 'self' covers /ocechain-api proxy. http:/ws: allow direct VPS access in local/dev.
+              "connect-src 'self' https: http: wss: ws:",
               "worker-src 'self' blob:",
               "frame-ancestors 'self'",
               "base-uri 'self'",
