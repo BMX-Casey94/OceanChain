@@ -8,6 +8,7 @@ import {
   getWsUrl,
   type TxEvent,
 } from "@/lib/api"
+import { WHATS_ON_CHAIN_TX } from "@/lib/site"
 
 type TickerItem = {
   key: string
@@ -15,6 +16,7 @@ type TickerItem = {
   coords: string
   speed: string
   tx: string
+  txid?: string
 }
 
 const TICKER_POLL_MS = 10_000
@@ -41,7 +43,12 @@ function toTickerItem(tx: TxEvent): TickerItem | null {
     coords: formatCoords(lat, lon),
     speed: `${Number(tx.speed || 0).toFixed(0)}kn`,
     tx: `${txid.slice(0, 8)}…`,
+    txid,
   }
+}
+
+function isBsvTxid(value: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(value)
 }
 
 function mergeItems(prev: TickerItem[], incoming: TickerItem[]): TickerItem[] {
@@ -72,7 +79,23 @@ function VesselEntry({ vessel }: { vessel: TickerItem }) {
       <span className="text-white text-sm font-sans">{vessel.name}</span>
       <span className="text-muted-foreground text-xs font-mono">{vessel.coords}</span>
       <span className="text-muted-foreground text-xs font-mono">{vessel.speed}</span>
-      <span className="text-teal-300/90 text-xs font-mono">tx: {vessel.tx}</span>
+      <span className="text-teal-300/90 text-xs font-mono">
+        tx:{" "}
+        {vessel.txid && isBsvTxid(vessel.txid) ? (
+          <a
+            href={WHATS_ON_CHAIN_TX(vessel.txid)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="View this transaction on WhatsOnChain"
+            className="underline decoration-teal-400/40 underline-offset-2 hover:text-teal-200 hover:decoration-teal-200"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {vessel.tx}
+          </a>
+        ) : (
+          vessel.tx
+        )}
+      </span>
     </span>
   )
 }
