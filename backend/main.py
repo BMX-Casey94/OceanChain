@@ -329,6 +329,8 @@ async def broadcasting_loop() -> None:
                 logger.debug("No vessels in snapshot, skipping batch")
                 continue
 
+            update_vessel_count(vessel_count)
+
             pool_ready = await utxo_manager.pool_depth()
             if pool_ready == 0:
                 logger.warning(
@@ -355,7 +357,6 @@ async def broadcasting_loop() -> None:
                 due_count,
                 pool_ready,
             )
-            update_vessel_count(vessel_count)
 
             if due_count == 0:
                 continue

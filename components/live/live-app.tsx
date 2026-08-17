@@ -146,6 +146,27 @@ export function LiveApp() {
     void loadVessels()
   }, [loadVessels])
 
+  // Soft-refresh the selected vessel from the live AIS snapshot so the pin moves
+  // independently of on-chain write interval (and without WebSocket).
+  useEffect(() => {
+    if (!selectedMmsi || !getApiBase()) return
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const detail = await fetchVessel(selectedMmsi)
+        if (cancelled || !detail) return
+        setVessels((prev) => upsertVessel(prev, detail))
+      } catch {
+        // keep last known position
+      }
+    }
+    const id = setInterval(() => void refresh(), 10000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [selectedMmsi])
+
   // Poll backend health so AIS rate-limit state is visible without overlapping the chart panel.
   useEffect(() => {
     if (!getApiBase()) return
