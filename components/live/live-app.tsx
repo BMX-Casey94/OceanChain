@@ -22,10 +22,12 @@ const VesselMap = dynamic(
 import {
   fetchApiHealth,
   fetchVessel,
+  fetchVesselTrail,
   fetchVessels,
   getApiBase,
   getWsUrl,
   type ApiHealth,
+  type TrailPoint,
   type TxEvent,
   type VesselSummary,
 } from "@/lib/api"
@@ -56,6 +58,9 @@ export function LiveApp() {
   const [error, setError] = useState<string | null>(null)
   const [health, setHealth] = useState<ApiHealth | null>(null)
   const [chartUnavailable, setChartUnavailable] = useState(false)
+  const [showTrail, setShowTrail] = useState(false)
+  const [trail, setTrail] = useState<TrailPoint[] | null>(null)
+  const [trailLoading, setTrailLoading] = useState(false)
 
   const selected = useMemo(
     () => vessels.find((v) => v.mmsi === selectedMmsi) ?? null,
@@ -64,6 +69,8 @@ export function LiveApp() {
 
   const selectVessel = useCallback((mmsi: string, fly = true) => {
     setSelectedMmsi(mmsi)
+    setShowTrail(false)
+    setTrail(null)
     trackEvent("vessel_opened", { mmsi })
     const match = vessels.find((v) => v.mmsi === mmsi)
     if (fly && match) {
@@ -75,6 +82,29 @@ export function LiveApp() {
       window.history.replaceState({}, "", url.toString())
     }
   }, [vessels])
+
+  const toggleTrail = useCallback(async () => {
+    if (!selectedMmsi) return
+    if (showTrail) {
+      setShowTrail(false)
+      setTrail(null)
+      trackEvent("route_tracker_toggled", { mmsi: selectedMmsi, enabled: false })
+      return
+    }
+    setTrailLoading(true)
+    try {
+      const points = await fetchVesselTrail(selectedMmsi)
+      setTrail(points)
+      setShowTrail(true)
+      trackEvent("route_tracker_toggled", {
+        mmsi: selectedMmsi,
+        enabled: true,
+        points: points.length,
+      })
+    } finally {
+      setTrailLoading(false)
+    }
+  }, [selectedMmsi, showTrail])
 
   const loadVessels = useCallback(async (opts?: {
     near?: { lat: number; lon: number }
@@ -89,10 +119,10 @@ export function LiveApp() {
       setError(null)
       const data = await fetchVessels(
         opts?.near
-          ? { near: `${opts.near.lat},${opts.near.lon}`, radius_nm: 120, limit: 5000 }
+          ? { near: `${opts.near.lat},${opts.near.lon}`, radius_nm: 120, limit: 8000 }
           : opts?.bbox
-            ? { bbox: opts.bbox, limit: 12000 }
-            : { limit: 12000 }
+            ? { bbox: opts.bbox, limit: 100000 }
+            : { limit: 100000 }
       )
       setVessels(data)
       setConn((c) => (c === "offline" ? c : "connected"))
@@ -334,6 +364,7 @@ export function LiveApp() {
         flyTo={flyTo}
         pulseMmsi={pulseMmsi}
         onAvailabilityChange={(available) => setChartUnavailable(!available)}
+        trail={showTrail ? trail : null}
       />
 
       <div className="absolute z-20 top-0 left-0 right-0 p-3 md:p-4 pointer-events-none">
@@ -381,7 +412,18 @@ export function LiveApp() {
         </div>
       )}
 
-      <VesselPanel vessel={selected} onClose={() => setSelectedMmsi(null)} />
+      <VesselPanel
+        vessel={selected}
+        onClose={() => {
+          setSelectedMmsi(null)
+          setShowTrail(false)
+          setTrail(null)
+        }}
+        showTrail={showTrail}
+        trailCount={trail?.length ?? 0}
+        trailLoading={trailLoading}
+        onToggleTrail={() => void toggleTrail()}
+      />
 
       <p className="absolute z-10 bottom-2 left-3 text-[10px] text-white/35 max-w-md">
         Not a navigational aid. AIS via AISstream. Positions may also be recorded on Bitcoin.

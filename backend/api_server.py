@@ -31,7 +31,14 @@ from config import (
     VPS_API_PORT,
 )
 from utxo_manager import utxo_manager
-from vessel_api import get_snapshot, get_vessel, list_vessels, record_vessel_tx, search_vessels
+from vessel_api import (
+    get_snapshot,
+    get_vessel,
+    get_vessel_trail,
+    list_vessels,
+    record_vessel_tx,
+    search_vessels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +308,13 @@ async def vessels_detail(mmsi: str) -> JSONResponse:
             status_code=404,
         )
     return JSONResponse(vessel)
+
+
+@app.get("/vessels/{mmsi}/trail")
+async def vessels_trail(mmsi: str) -> JSONResponse:
+    """Recent broadcast positions (oldest first) for the route tracker."""
+    points = get_vessel_trail(mmsi.strip())
+    return JSONResponse({"mmsi": mmsi.strip(), "count": len(points), "points": points})
 
 
 @app.get("/stats/timeseries")

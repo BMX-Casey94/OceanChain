@@ -13,6 +13,8 @@ SnapshotProvider = Callable[[], dict[str, dict[str, Any]]]
 
 _snapshot_provider: Optional[SnapshotProvider] = None
 _last_tx_by_mmsi: dict[str, dict[str, Any]] = {}
+# Recent broadcast positions per MMSI for the route tracker (newest last).
+_trail_by_mmsi: dict[str, list[dict[str, Any]]] = {}
 
 
 def set_vessel_snapshot_provider(provider: SnapshotProvider) -> None:
@@ -30,6 +32,31 @@ def record_vessel_tx(tx_event: dict[str, Any]) -> None:
         "timestamp": tx_event.get("timestamp"),
         "broadcaster": tx_event.get("broadcaster"),
     }
+    try:
+        lat = float(tx_event.get("lat"))
+        lon = float(tx_event.get("lon"))
+    except (TypeError, ValueError):
+        return
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return
+    from config import VESSEL_TRAIL_MAX_POINTS
+
+    trail = _trail_by_mmsi.setdefault(mmsi, [])
+    trail.append(
+        {
+            "lat": lat,
+            "lon": lon,
+            "timestamp": int(tx_event.get("timestamp") or 0),
+            "txid": tx_event.get("txid"),
+        }
+    )
+    if len(trail) > VESSEL_TRAIL_MAX_POINTS:
+        del trail[: len(trail) - VESSEL_TRAIL_MAX_POINTS]
+
+
+def get_vessel_trail(mmsi: str) -> list[dict[str, Any]]:
+    """Oldest → newest broadcast positions for this MMSI (process memory only)."""
+    return list(_trail_by_mmsi.get(mmsi, []))
 
 
 def get_last_tx(mmsi: str) -> Optional[dict[str, Any]]:

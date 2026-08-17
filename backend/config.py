@@ -144,7 +144,11 @@ VESSEL_SEARCH_RATE_WINDOW_SECONDS: int = int(
     os.getenv("VESSEL_SEARCH_RATE_WINDOW_SECONDS", "60")
 )
 VESSELS_LIST_DEFAULT_LIMIT: int = int(os.getenv("VESSELS_LIST_DEFAULT_LIMIT", "8000"))
-VESSELS_LIST_MAX_LIMIT: int = int(os.getenv("VESSELS_LIST_MAX_LIMIT", "20000"))
+# Hard cap for GET /vessels limit= (full fleet snapshots can exceed 60k).
+VESSELS_LIST_MAX_LIMIT: int = int(os.getenv("VESSELS_LIST_MAX_LIMIT", "100000"))
+
+# In-memory trail for route tracker: last N broadcast positions per MMSI (process-local).
+VESSEL_TRAIL_MAX_POINTS: int = int(os.getenv("VESSEL_TRAIL_MAX_POINTS", "200"))
 
 # Optional: on first successful vessel broadcast after startup, write raw tx hex to this path
 # (ASCII, one line) for offline checks: POST https://api.whatsonchain.com/v1/bsv/main/tx/decode

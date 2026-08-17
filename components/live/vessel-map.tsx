@@ -7,7 +7,7 @@ import {
   setWorkerUrl,
   type GeoJSONSource,
 } from "maplibre-gl"
-import type { VesselSummary } from "@/lib/api"
+import type { TrailPoint, VesselSummary } from "@/lib/api"
 
 const STYLE_URL = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
 
@@ -23,6 +23,8 @@ type VesselMapProps = {
   flyTo?: { lon: number; lat: number; zoom?: number; key: number } | null
   pulseMmsi?: string | null
   onAvailabilityChange?: (available: boolean) => void
+  /** Route tracker polyline (oldest → newest), or null to hide. */
+  trail?: TrailPoint[] | null
 }
 
 type WebGLStatus = "ok" | "webgl1-only" | "none"
@@ -163,6 +165,7 @@ export function VesselMap({
   flyTo,
   pulseMmsi,
   onAvailabilityChange,
+  trail = null,
 }: VesselMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
@@ -281,6 +284,32 @@ export function VesselMap({
         },
       })
 
+      map.addSource("vessel-trail", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      })
+      map.addLayer({
+        id: "vessel-trail-line",
+        type: "line",
+        source: "vessel-trail",
+        paint: {
+          "line-color": "#5eead4",
+          "line-width": 2.5,
+          "line-opacity": 0.85,
+        },
+      })
+      map.addLayer({
+        id: "vessel-trail-points",
+        type: "circle",
+        source: "vessel-trail",
+        paint: {
+          "circle-color": "#99f6e4",
+          "circle-radius": 3.5,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "rgba(255,255,255,0.5)",
+        },
+      })
+
       map.on("click", "clusters", async (e) => {
         const features = map!.queryRenderedFeatures(e.point, { layers: ["clusters"] })
         const clusterId = features[0]?.properties?.cluster_id
@@ -347,6 +376,30 @@ export function VesselMap({
       ])
     }
   }, [vessels, selectedMmsi, pulseMmsi, mapError, sourceReady])
+
+  useEffect(() => {
+    if (!sourceReady || mapError) return
+    const map = mapRef.current
+    if (!map) return
+    const source = map.getSource("vessel-trail") as GeoJSONSource | undefined
+    if (!source) return
+    if (!trail || trail.length === 0) {
+      source.setData({ type: "FeatureCollection", features: [] })
+      return
+    }
+    const coords = trail.map((p) => [p.lon, p.lat] as [number, number])
+    const line: GeoJSON.Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "LineString", coordinates: coords },
+    }
+    const points: GeoJSON.Feature[] = trail.map((p) => ({
+      type: "Feature",
+      properties: { timestamp: p.timestamp, txid: p.txid ?? "" },
+      geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+    }))
+    source.setData({ type: "FeatureCollection", features: [line, ...points] })
+  }, [trail, mapError, sourceReady])
 
   useEffect(() => {
     if (!flyTo || !mapRef.current || mapError) return

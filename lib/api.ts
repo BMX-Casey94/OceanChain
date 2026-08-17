@@ -129,6 +129,24 @@ export async function fetchVessel(mmsi: string): Promise<VesselSummary | null> {
   return (await res.json()) as VesselSummary
 }
 
+export type TrailPoint = {
+  lat: number
+  lon: number
+  timestamp: number
+  txid?: string | null
+}
+
+export async function fetchVesselTrail(mmsi: string): Promise<TrailPoint[]> {
+  const base = getApiBase()
+  if (!base) return []
+  const res = await fetch(`${base}/vessels/${encodeURIComponent(mmsi)}/trail`, {
+    cache: "no-store",
+  })
+  if (!res.ok) return []
+  const data = await res.json()
+  return (data.points ?? []) as TrailPoint[]
+}
+
 export async function searchVessels(q: string, limit = 12): Promise<VesselSummary[]> {
   const base = getApiBase()
   if (!base) return []
