@@ -122,20 +122,28 @@ function webglHelp(status: Exclude<WebGLStatus, "ok">, reason: string | null): s
 function toFeatureCollection(vessels: VesselSummary[]): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
-    features: vessels.map((v) => ({
-      type: "Feature",
-      properties: {
-        mmsi: v.mmsi,
-        name: v.name || v.mmsi,
-        heading: v.heading ?? 0,
-        speed: v.speed,
-        selected: 0,
-      },
-      geometry: {
-        type: "Point",
-        coordinates: [v.lon, v.lat],
-      },
-    })),
+    features: vessels
+      .filter(
+        (v) =>
+          Number.isFinite(v.lat) &&
+          Number.isFinite(v.lon) &&
+          Math.abs(v.lat) <= 90 &&
+          Math.abs(v.lon) <= 180
+      )
+      .map((v) => ({
+        type: "Feature",
+        properties: {
+          mmsi: v.mmsi,
+          name: v.name || v.mmsi,
+          heading: v.heading ?? 0,
+          speed: v.speed,
+          selected: 0,
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [v.lon, v.lat],
+        },
+      })),
   }
 }
 
@@ -158,10 +166,14 @@ export function VesselMap({
 }: VesselMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
+  const vesselsRef = useRef(vessels)
   const onSelectRef = useRef(onSelect)
   const [mapError, setMapError] = useState<string | null>(null)
   const [diagnostics, setDiagnostics] = useState<WebGLDiagnostics | null>(null)
+  /** True after vessels GeoJSON source + layers exist — avoids race with early /vessels fetch. */
+  const [sourceReady, setSourceReady] = useState(false)
   onSelectRef.current = onSelect
+  vesselsRef.current = vessels
 
   useEffect(() => {
     onAvailabilityChange?.(!mapError)
@@ -216,9 +228,10 @@ export function VesselMap({
     map.on("load", () => {
       if (cancelled || !map) return
 
+      // Seed with whatever the fleet fetch already returned (often before style load).
       map.addSource("vessels", {
         type: "geojson",
-        data: toFeatureCollection([]),
+        data: toFeatureCollection(vesselsRef.current),
         cluster: true,
         clusterMaxZoom: 9,
         clusterRadius: 48,
@@ -246,7 +259,8 @@ export function VesselMap({
         layout: {
           "text-field": "{point_count_abbreviated}",
           "text-size": 11,
-          "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+          // Match Carto Dark Matter glyphs; missing fonts can break symbol layers.
+          "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
         },
         paint: {
           "text-color": "#ecfeff",
@@ -294,18 +308,22 @@ export function VesselMap({
       map.on("mouseleave", "clusters", () => {
         map!.getCanvas().style.cursor = ""
       })
+
+      if (!cancelled) setSourceReady(true)
     })
 
     return () => {
       cancelled = true
+      setSourceReady(false)
       safeRemoveMap(map)
       mapRef.current = null
     }
   }, [])
 
   useEffect(() => {
+    if (!sourceReady || mapError) return
     const map = mapRef.current
-    if (!map || mapError) return
+    if (!map) return
     const source = map.getSource("vessels") as GeoJSONSource | undefined
     if (!source) return
     source.setData(toFeatureCollection(vessels))
@@ -328,7 +346,7 @@ export function VesselMap({
         4.5,
       ])
     }
-  }, [vessels, selectedMmsi, pulseMmsi, mapError])
+  }, [vessels, selectedMmsi, pulseMmsi, mapError, sourceReady])
 
   useEffect(() => {
     if (!flyTo || !mapRef.current || mapError) return
