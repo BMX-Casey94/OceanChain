@@ -183,6 +183,8 @@ def parse_ship_static(message: dict[str, Any]) -> Optional[dict[str, Any]]:
     if ship_type is not None and (ship_type < 0 or ship_type > 99):
         ship_type = None
 
+    length_m, beam_m = _hull_metres(body.get("Dimension"))
+
     return {
         "mmsi": mmsi,
         "ship_name": name,
@@ -190,7 +192,22 @@ def parse_ship_static(message: dict[str, Any]) -> Optional[dict[str, Any]]:
         "destination": destination,
         "imo": imo,
         "ship_type": ship_type,
+        "length_m": length_m,
+        "beam_m": beam_m,
     }
+
+
+def _hull_metres(dimension: Any) -> tuple[Optional[int], Optional[int]]:
+    """AIS Dimension A+B = length, C+D = beam (metres)."""
+    if not isinstance(dimension, dict):
+        return None, None
+    a = _int_or_none(dimension.get("A")) or 0
+    b = _int_or_none(dimension.get("B")) or 0
+    c = _int_or_none(dimension.get("C")) or 0
+    d = _int_or_none(dimension.get("D")) or 0
+    length = a + b
+    beam = c + d
+    return (length if length > 0 else None), (beam if beam > 0 else None)
 
 
 def _overlay_static(target: dict[str, Any], static: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +217,9 @@ def _overlay_static(target: dict[str, Any], static: dict[str, Any]) -> dict[str,
         out["ship_type"] = static["ship_type"]
     for key in ("ship_name", "call_sign", "destination", "imo"):
         if not out.get(key) and static.get(key):
+            out[key] = static[key]
+    for key in ("length_m", "beam_m"):
+        if out.get(key) in (None, 0) and static.get(key):
             out[key] = static[key]
     return out
 

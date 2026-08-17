@@ -5,6 +5,8 @@ export type VesselSummary = {
   destination: string
   imo: string
   ship_type: number | null
+  length_m?: number | null
+  beam_m?: number | null
   lat: number
   lon: number
   speed: number

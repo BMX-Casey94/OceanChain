@@ -66,13 +66,18 @@ export function VesselPanel({
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-[0.18em] text-teal-300/80 mb-1">
-            {vesselKindLabel(vessel.ship_type, vessel.name)}
+            {vesselKindLabel(vessel.ship_type, vessel.name, vessel.length_m, vessel.beam_m)}
           </p>
           <h2 className="font-heading text-2xl tracking-wide text-white leading-tight">{title}</h2>
         </div>
         <div className="flex items-start gap-1 shrink-0">
-          <div className="w-24 opacity-80">
-            <VesselSilhouette shipType={vessel.ship_type} name={vessel.name} />
+          <div className="w-40 opacity-90">
+            <VesselSilhouette
+              shipType={vessel.ship_type}
+              name={vessel.name}
+              lengthM={vessel.length_m}
+              beamM={vessel.beam_m}
+            />
           </div>
           <button
             type="button"
@@ -86,7 +91,7 @@ export function VesselPanel({
       </div>
 
       <div className="space-y-0">
-        <Row label="Type" value={vesselKindDetail(vessel.ship_type, vessel.name)} />
+        <Row label="Type" value={vesselKindDetail(vessel.ship_type, vessel.name, vessel.length_m, vessel.beam_m)} />
         <Row label="MMSI" value={vessel.mmsi} />
         <Row label="Call sign" value={vessel.call_sign || "—"} />
         <Row label="IMO" value={vessel.imo || "—"} />
