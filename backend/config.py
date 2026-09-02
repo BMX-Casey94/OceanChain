@@ -140,12 +140,31 @@ BROADCAST_POSITION_JUMP_NM: float = float(os.getenv("BROADCAST_POSITION_JUMP_NM"
 ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "ACCEPTED_BY_NETWORK").strip().upper()
 # Maximum seconds to wait for ARC status polling before retry/failover.
 ARC_MAX_TIMEOUT_SECONDS: int = int(os.getenv("ARC_MAX_TIMEOUT_SECONDS", "10"))
+# Dual broadcast: submit every tx to GorillaPool AND TAAL concurrently (TAAL requires
+# TAAL_API_KEY). Two independent operators injecting the tx is what actually fixes the
+# "Arcade says SEEN but the network never saw it" failure mode, and it makes both ARC
+# status endpoints authoritative for the tx so the reaper can quorum-check propagation
+# without rate-limited explorer APIs. Auto-disabled (with a startup warning) when no
+# TAAL key is configured.
+ARC_DUAL_BROADCAST: bool = os.getenv("ARC_DUAL_BROADCAST", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Pending-change gate: change outputs from accepted-but-not-yet-propagated txs enter the
 # pool as pending and only become spendable once the creating tx reaches this ARC status.
 # Prevents orphan chains built on parents Arcade accepted but never propagated (the
 # PENDING_RETRY / WoC-404 failure mode). Must be SEEN_ON_NETWORK or later to be meaningful.
 PENDING_PROMOTE_STATUS: str = os.getenv("PENDING_PROMOTE_STATUS", "SEEN_ON_NETWORK").strip().upper()
+# How many of the ARC endpoints that accepted a tx must report PENDING_PROMOTE_STATUS
+# before its pending outputs become spendable. 2 = every accepting endpoint (a tx both
+# GorillaPool and TAAL have in mempool will be mined and indexed — Arcade-only "SEEN"
+# can no longer unlock phantom change). 1 = primary endpoint only (legacy behaviour).
+# Per-tx the requirement is intersected with the endpoints that actually accepted the
+# submit, so a tx TAAL refused at POST time never stalls on TAAL.
+PENDING_PROMOTE_QUORUM: int = int(os.getenv("PENDING_PROMOTE_QUORUM", "2"))
 # Reaper cadence and batching for promotion polls (off the broadcast hot path).
 # Batch counts distinct creating txids, so one fan-out's outputs poll as a single tx.
 # Capacity must exceed the tx creation rate. The reaper does not sleep between
@@ -341,6 +360,8 @@ def validate_config() -> list[str]:
             "PENDING_PROMOTE_STATUS must be one of: "
             + ", ".join(sorted(allowed_promote))
         )
+    if PENDING_PROMOTE_QUORUM not in (1, 2):
+        errors.append("PENDING_PROMOTE_QUORUM must be 1 or 2")
     if PENDING_REAPER_INTERVAL_SECONDS < 5:
         errors.append("PENDING_REAPER_INTERVAL_SECONDS must be >= 5")
     if PENDING_REAPER_BATCH_SIZE < 1:
@@ -396,7 +417,9 @@ def get_config_summary() -> dict:
         "broadcast_concurrency": BROADCAST_CONCURRENCY,
         "arc_wait_for_status": ARC_WAIT_FOR_STATUS,
         "arc_max_timeout_seconds": ARC_MAX_TIMEOUT_SECONDS,
+        "arc_dual_broadcast": ARC_DUAL_BROADCAST and bool(TAAL_API_KEY),
         "pending_promote_status": PENDING_PROMOTE_STATUS,
+        "pending_promote_quorum": PENDING_PROMOTE_QUORUM,
         "pending_reaper_interval_seconds": PENDING_REAPER_INTERVAL_SECONDS,
         "pending_max_age_seconds": PENDING_MAX_AGE_SECONDS,
         "pending_spendable_watermark": PENDING_SPENDABLE_WATERMARK,

@@ -2,7 +2,11 @@
 OceanChain Broadcaster Module
 
 Handles submission of raw transactions to ARC-compatible endpoints with
-GorillaPool Arcade as primary and TAAL as fallback.
+GorillaPool Arcade as primary and TAAL as fallback. When ARC_DUAL_BROADCAST is
+enabled and a TAAL key is configured, every tx is also submitted to TAAL
+concurrently: two independent operators injecting the tx is what makes it
+propagate to explorers, and it lets the pending-reaper require quorum (both
+endpoints reporting SEEN_ON_NETWORK+) before unlocking change outputs.
 """
 
 import asyncio
@@ -17,6 +21,7 @@ from config import (
     GORILLA_ARC_URL,
     GORILLA_TX_FORMAT,
     TAAL_ARC_URL,
+    ARC_DUAL_BROADCAST,
     ARC_MAX_TIMEOUT_SECONDS,
     ARC_WAIT_FOR_STATUS,
     VERBOSE_ARC_LOGS,
@@ -78,20 +83,37 @@ async def _record_arc_attempt(broadcaster_name: str, start: float, success: bool
         pass
 
 
+# submit_mask bits: which ARC endpoints accepted the tx into their pipeline.
+SUBMIT_MASK_GORILLA = 1
+SUBMIT_MASK_TAAL = 2
+
+# Bound on the secondary (TAAL) POST in dual-broadcast mode, so a slow-but-alive
+# TAAL cannot stretch per-tx latency beyond this even when GorillaPool is fast.
+_DUAL_POST_TIMEOUT_SECONDS = 5.0
+
+
 class BroadcastError(Exception):
     """Exception raised when transaction broadcast fails on all endpoints."""
-    
+
     def __init__(
         self,
         message: str,
         gorilla_error: Optional[str] = None,
         taal_error: Optional[str] = None,
         tx_was_submitted: bool = False,
+        posted: bool = False,
+        submit_mask: int = 0,
     ) -> None:
         super().__init__(message)
         self.gorilla_error = gorilla_error
         self.taal_error = taal_error
         self.tx_was_submitted = tx_was_submitted
+        # posted=True: this endpoint returned 2xx for the POST (it has the tx) and the
+        # failure happened during status polling. posted=False: nothing suggests the
+        # endpoint ever saw the tx.
+        self.posted = posted
+        # Endpoints confirmed to hold the tx (2xx POST, non-terminal status).
+        self.submit_mask = submit_mask
 
 
 def _normalise_tx_status(value: Any) -> Optional[str]:
@@ -212,6 +234,7 @@ def _raise_arc_http_error(
     )
     raise BroadcastError(
         detail,
+        posted=during_status_poll,
         **_error_kwargs(
             broadcaster_name,
             f"{broadcaster_name}:http_{response.status_code}:{snippet}",
@@ -311,6 +334,7 @@ async def _poll_arc_status(
         if not tx_status:
             raise BroadcastError(
                 f"ARC status response missing txStatus for {txid} (api status={api_status!r})",
+                posted=True,
                 **_error_kwargs(
                     broadcaster_name,
                     f"{broadcaster_name}:missing_txStatus:{api_status}",
@@ -356,6 +380,7 @@ async def _poll_arc_status(
         )
     raise BroadcastError(
         timeout_message,
+        posted=True,
         **_error_kwargs(
             broadcaster_name,
             f"{broadcaster_name}:timeout_waiting_for:{ARC_WAIT_FOR_STATUS}:{last_status}",
@@ -363,15 +388,21 @@ async def _poll_arc_status(
     )
 
 
-async def _submit_to_arc(
+async def _post_to_arc(
     client: httpx.AsyncClient,
     url: str,
     raw_tx_hex: str,
     broadcaster_name: str,
     api_key: Optional[str] = None,
+    timeout: float = 10.0,
 ) -> dict[str, Any]:
     """
-    Submit a transaction to an ARC endpoint.
+    POST a transaction to an ARC endpoint (no status polling).
+
+    Returns once the endpoint has answered the POST; a 2xx with a non-terminal
+    txStatus means the tx is in that operator's pipeline, which is all the
+    dual-broadcast secondary path and the submit_mask need.
+
     GorillaPool Arcade requires no API key. TAAL requires Bearer token.
     """
     start_time = time.monotonic()
@@ -389,7 +420,7 @@ async def _submit_to_arc(
         url,
         headers=headers,
         json=payload,
-        timeout=10.0,
+        timeout=timeout,
     )
     
     latency_ms = (time.monotonic() - start_time) * 1000
@@ -432,9 +463,12 @@ async def _submit_to_arc(
         api_status,
     )
 
+    # 2xx with an unusable body: the endpoint did receive the tx, so failures
+    # here must read as posted=True for the conservative pending-change path.
     if not tx_status:
         raise BroadcastError(
             f"ARC response missing txStatus (api status={api_status!r})",
+            posted=True,
             **_error_kwargs(
                 broadcaster_name,
                 f"{broadcaster_name}:missing_txStatus:{api_status}",
@@ -444,6 +478,7 @@ async def _submit_to_arc(
     if not txid:
         raise BroadcastError(
             "ARC response missing txid",
+            posted=True,
             **_error_kwargs(broadcaster_name, f"{broadcaster_name}:missing_txid"),
         )
 
@@ -463,17 +498,35 @@ async def _submit_to_arc(
             **_error_kwargs(broadcaster_name, f"{broadcaster_name}:{tx_status}"),
         )
 
-    if _target_status_reached(tx_status):
-        return {
-            "txid": txid,
-            "broadcaster": broadcaster_name,
-            "status": tx_status,
-        }
+    return {
+        "txid": txid,
+        "broadcaster": broadcaster_name,
+        "status": tx_status,
+    }
+
+
+async def _submit_to_arc(
+    client: httpx.AsyncClient,
+    url: str,
+    raw_tx_hex: str,
+    broadcaster_name: str,
+    api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Submit a transaction to an ARC endpoint and poll until ARC_WAIT_FOR_STATUS.
+    GorillaPool Arcade requires no API key. TAAL requires Bearer token.
+    """
+    result = await _post_to_arc(
+        client, url, raw_tx_hex, broadcaster_name, api_key=api_key
+    )
+
+    if _target_status_reached(result["status"]):
+        return result
 
     return await _poll_arc_status(
         client,
         url,
-        str(txid),
+        str(result["txid"]),
         broadcaster_name,
         api_key=api_key,
     )
@@ -485,10 +538,16 @@ async def submit(
     gorilla_tx_hex: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Submit a transaction with primary + fallback logic.
-    
-    Attempts GorillaPool Arcade first, with one retry on failure.
-    Falls back to TAAL ARC if GorillaPool fails twice.
+    Submit a transaction: dual broadcast when configured, else primary + fallback.
+
+    Dual mode (ARC_DUAL_BROADCAST=1 and TAAL_API_KEY set): POST to GorillaPool and
+    TAAL concurrently, then poll the primary to ARC_WAIT_FOR_STATUS. Two independent
+    operators holding the tx is what makes it reach explorers; the reaper quorum-
+    checks both endpoints off the hot path. A TAAL failure never fails the broadcast
+    while GorillaPool succeeds.
+
+    Single mode: GorillaPool Arcade first, one retry on non-terminal failure, then
+    TAAL ARC fallback when configured.
     
     Args:
         raw_tx_hex: Standard raw transaction hex string (always used for TAAL path).
@@ -496,13 +555,33 @@ async def submit(
             according to GORILLA_TX_FORMAT.
         
     Returns:
-        Dict with txid, broadcaster, status
+        Dict with txid, broadcaster, status, submit_mask (bit0=gorillapool,
+        bit1=taal: endpoints confirmed to hold the tx — the reaper's quorum input)
         
     Raises:
         BroadcastError if all attempts fail
     """
+    if ARC_DUAL_BROADCAST and TAAL_API_KEY:
+        return await _submit_dual(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
+    return await _submit_sequential(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
+
+
+def _is_terminal_error_text(text: str) -> bool:
+    return any(s in text for s in ("terminal failure", "REJECTED", "DOUBLE_SPEND"))
+
+
+async def _submit_sequential(
+    raw_tx_hex: str,
+    *,
+    gorilla_tx_hex: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Primary + fallback logic: GorillaPool Arcade first with one retry on
+    non-terminal failure, then TAAL ARC fallback when configured.
+    """
     gorilla_error: Optional[str] = None
     taal_error: Optional[str] = None
+    submit_mask = 0
     
     async with httpx.AsyncClient() as client:
         gorilla_submit_enabled = True
@@ -537,17 +616,21 @@ async def submit(
                     "gorillapool",
                 )
                 await _record_arc_attempt("gorillapool", attempt_start, True)
+                result["submit_mask"] = SUBMIT_MASK_GORILLA
                 return result
             except BroadcastError as e:
                 await _record_arc_attempt("gorillapool", attempt_start, False)
                 gorilla_error = _safe_exc_text(e)
-                if any(s in gorilla_error for s in ("terminal failure", "REJECTED", "DOUBLE_SPEND")):
+                if _is_terminal_error_text(gorilla_error):
                     gorilla_terminal = True
                     _arc_detail(
                         "GorillaPool attempt 1 terminal rejection, skipping retry: %s",
                         gorilla_error,
                     )
                 else:
+                    if e.posted:
+                        # POST landed but polling failed: GorillaPool holds the tx.
+                        submit_mask |= SUBMIT_MASK_GORILLA
                     _arc_detail("GorillaPool attempt 1 failed: %s", gorilla_error)
             except Exception as e:
                 await _record_arc_attempt("gorillapool", attempt_start, False)
@@ -567,10 +650,17 @@ async def submit(
                         "gorillapool",
                     )
                     await _record_arc_attempt("gorillapool", attempt_start, True)
+                    result["submit_mask"] = SUBMIT_MASK_GORILLA
                     return result
                 except Exception as e:
                     await _record_arc_attempt("gorillapool", attempt_start, False)
                     gorilla_error = _safe_exc_text(e)
+                    if (
+                        isinstance(e, BroadcastError)
+                        and e.posted
+                        and not _is_terminal_error_text(gorilla_error)
+                    ):
+                        submit_mask |= SUBMIT_MASK_GORILLA
                     _arc_detail("GorillaPool attempt 2 failed: %s", gorilla_error)
 
         # TAAL fallback when configured
@@ -582,17 +672,190 @@ async def submit(
                     client, TAAL_ARC_URL, raw_tx_hex, "taal", api_key=TAAL_API_KEY
                 )
                 await _record_arc_attempt("taal", attempt_start, True)
+                result["submit_mask"] = submit_mask | SUBMIT_MASK_TAAL
                 return result
             except Exception as e:
                 await _record_arc_attempt("taal", attempt_start, False)
                 taal_error = _safe_exc_text(e)
+                if (
+                    isinstance(e, BroadcastError)
+                    and e.posted
+                    and not _is_terminal_error_text(taal_error)
+                ):
+                    submit_mask |= SUBMIT_MASK_TAAL
                 _arc_detail("TAAL fallback failed: %s", taal_error)
-    
+
     raise BroadcastError(
         "All broadcast attempts failed",
         gorilla_error=gorilla_error,
         taal_error=taal_error,
         tx_was_submitted=tx_was_submitted,
+        submit_mask=submit_mask,
+    )
+
+
+async def _submit_dual(
+    raw_tx_hex: str,
+    *,
+    gorilla_tx_hex: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Dual broadcast: POST to GorillaPool and TAAL concurrently, then poll the
+    primary (GorillaPool) to ARC_WAIT_FOR_STATUS.
+
+    The secondary POST is bounded by _DUAL_POST_TIMEOUT_SECONDS so a slow TAAL
+    cannot stretch per-tx latency; tracking TAAL-side propagation is the
+    reaper's job, not the hot path's. GorillaPool failure falls back to
+    completing on TAAL when TAAL's POST landed, plus one GorillaPool retry for
+    non-terminal POST errors.
+    """
+    gorilla_error: Optional[str] = None
+    taal_error: Optional[str] = None
+
+    async with httpx.AsyncClient() as client:
+        gorilla_submit_enabled = True
+        selected_gorilla_tx_hex = raw_tx_hex
+        try:
+            selected_gorilla_tx_hex, gorilla_fmt = _select_gorilla_tx_hex(
+                raw_tx_hex,
+                gorilla_tx_hex,
+            )
+            _arc_detail(
+                "GorillaPool submission format selected: %s (GORILLA_TX_FORMAT=%s)",
+                gorilla_fmt,
+                GORILLA_TX_FORMAT,
+            )
+        except BroadcastError as fmt_err:
+            gorilla_submit_enabled = False
+            gorilla_error = _safe_exc_text(fmt_err)
+            _arc_detail("Skipping GorillaPool submit: %s", gorilla_error)
+
+        post_start = time.monotonic()
+        g_res: Any = None
+        t_res: Any
+        if gorilla_submit_enabled:
+            g_res, t_res = await asyncio.gather(
+                _post_to_arc(
+                    client, GORILLA_ARC_URL, selected_gorilla_tx_hex, "gorillapool"
+                ),
+                _post_to_arc(
+                    client,
+                    TAAL_ARC_URL,
+                    raw_tx_hex,
+                    "taal",
+                    api_key=TAAL_API_KEY,
+                    timeout=_DUAL_POST_TIMEOUT_SECONDS,
+                ),
+                return_exceptions=True,
+            )
+        else:
+            try:
+                t_res = await _post_to_arc(
+                    client,
+                    TAAL_ARC_URL,
+                    raw_tx_hex,
+                    "taal",
+                    api_key=TAAL_API_KEY,
+                    timeout=_DUAL_POST_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                t_res = e
+
+        # TAAL stats: success = POST landed. Getting the tx into TAAL's mempool is
+        # the point of dual broadcast; status tracking is the reaper's job.
+        await _record_arc_attempt("taal", post_start, isinstance(t_res, dict))
+        if not isinstance(t_res, dict):
+            taal_error = (
+                _safe_exc_text(t_res) if isinstance(t_res, Exception) else "unknown"
+            )
+            _arc_detail("TAAL dual-broadcast POST failed: %s", taal_error)
+
+        submit_mask = 0
+        if isinstance(g_res, dict):
+            submit_mask |= SUBMIT_MASK_GORILLA
+        if isinstance(t_res, dict):
+            submit_mask |= SUBMIT_MASK_TAAL
+
+        if isinstance(g_res, dict):
+            try:
+                if _target_status_reached(g_res["status"]):
+                    result = g_res
+                else:
+                    result = await _poll_arc_status(
+                        client, GORILLA_ARC_URL, str(g_res["txid"]), "gorillapool"
+                    )
+                await _record_arc_attempt("gorillapool", post_start, True)
+                result["submit_mask"] = submit_mask
+                return result
+            except Exception as e:
+                await _record_arc_attempt("gorillapool", post_start, False)
+                gorilla_error = _safe_exc_text(e)
+                if _is_terminal_error_text(gorilla_error):
+                    # GorillaPool definitively dropped it; only TAAL can vouch now.
+                    submit_mask &= ~SUBMIT_MASK_GORILLA
+                _arc_detail(
+                    "GorillaPool dual-broadcast poll failed: %s", gorilla_error
+                )
+        elif gorilla_submit_enabled:
+            if isinstance(g_res, Exception):
+                gorilla_error = _safe_exc_text(g_res)
+            await _record_arc_attempt("gorillapool", post_start, False)
+            if gorilla_error and not _is_terminal_error_text(gorilla_error):
+                await asyncio.sleep(2.0)
+                retry_start = time.monotonic()
+                try:
+                    result = await _submit_to_arc(
+                        client,
+                        GORILLA_ARC_URL,
+                        selected_gorilla_tx_hex,
+                        "gorillapool",
+                    )
+                    await _record_arc_attempt("gorillapool", retry_start, True)
+                    submit_mask |= SUBMIT_MASK_GORILLA
+                    result["submit_mask"] = submit_mask
+                    return result
+                except Exception as e:
+                    await _record_arc_attempt("gorillapool", retry_start, False)
+                    gorilla_error = _safe_exc_text(e)
+                    if (
+                        isinstance(e, BroadcastError)
+                        and e.posted
+                        and not _is_terminal_error_text(gorilla_error)
+                    ):
+                        submit_mask |= SUBMIT_MASK_GORILLA
+                    _arc_detail(
+                        "GorillaPool dual-broadcast retry failed: %s", gorilla_error
+                    )
+
+        # GorillaPool could not complete; ride TAAL to the target status if its
+        # POST landed (the tx is live there regardless of GorillaPool's state).
+        if isinstance(t_res, dict):
+            try:
+                if _target_status_reached(t_res["status"]):
+                    result = dict(t_res)
+                else:
+                    result = await _poll_arc_status(
+                        client,
+                        TAAL_ARC_URL,
+                        str(t_res["txid"]),
+                        "taal",
+                        api_key=TAAL_API_KEY,
+                    )
+                result["broadcaster"] = "taal"
+                result["submit_mask"] = submit_mask
+                return result
+            except Exception as e:
+                taal_error = _safe_exc_text(e)
+                _arc_detail(
+                    "TAAL completion after GorillaPool failure failed: %s", taal_error
+                )
+
+    raise BroadcastError(
+        "All broadcast attempts failed",
+        gorilla_error=gorilla_error,
+        taal_error=taal_error,
+        tx_was_submitted=True,
+        submit_mask=submit_mask,
     )
 
 
@@ -673,6 +936,81 @@ async def check_tx_status(txid: str) -> Optional[str]:
     if saw_not_found and not saw_transport_error:
         return "NOT_FOUND"
     return None
+
+
+async def _get_status_one(
+    client: httpx.AsyncClient,
+    broadcaster_name: str,
+    submit_url: str,
+    api_key: Optional[str],
+    txid: str,
+) -> Optional[str]:
+    """
+    One lightweight GET /tx/{txid} against one ARC endpoint.
+
+    Returns the normalised txStatus, "NOT_FOUND" on a clean 404, or None on
+    transport/HTTP errors — None must read as "unknown", never as dead.
+    """
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = await client.get(
+            _status_url(submit_url, txid),
+            headers=headers,
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        _arc_detail(
+            "Status check via %s failed for %s: %s",
+            broadcaster_name,
+            txid[:16],
+            exc,
+        )
+        return None
+
+    if response.status_code == 404:
+        return "NOT_FOUND"
+    if response.status_code >= 400:
+        _arc_detail(
+            "Status check via %s HTTP %s for %s",
+            broadcaster_name,
+            response.status_code,
+            txid[:16],
+        )
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    _, _, tx_status = _extract_arc_response(data)
+    return tx_status or None
+
+
+async def check_tx_status_all(txid: str) -> dict[str, Optional[str]]:
+    """
+    Poll every configured ARC endpoint concurrently; return per-endpoint status.
+
+    Values: normalised txStatus, "NOT_FOUND" (clean 404), or None (transport/HTTP
+    error — unknown, never dead). "gorillapool" is always present; "taal" appears
+    when TAAL_API_KEY is configured. Used by the pending-coin reaper for
+    quorum-gated promotion.
+    """
+    endpoints: list[tuple[str, str, Optional[str]]] = [
+        ("gorillapool", GORILLA_ARC_URL, None)
+    ]
+    if TAAL_API_KEY:
+        endpoints.append(("taal", TAAL_ARC_URL, TAAL_API_KEY))
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(
+            *(
+                _get_status_one(client, name, url, key, txid)
+                for name, url, key in endpoints
+            )
+        )
+    return {name: status for (name, _, _), status in zip(endpoints, results)}
 
 
 async def submit_raw(raw_tx_hex: str) -> str:

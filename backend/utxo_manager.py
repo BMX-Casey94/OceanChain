@@ -113,6 +113,13 @@ class UTXOManager:
                 ALTER TABLE utxos ADD COLUMN IF NOT EXISTS pending BOOLEAN NOT NULL DEFAULT FALSE
             """)
 
+            # Per-tx submit quorum: which ARC endpoints accepted the creating tx
+            # (bit0=GorillaPool, bit1=TAAL). Existing rows default 1 (GorillaPool-only),
+            # matching pre-dual-broadcast behaviour.
+            await conn.execute("""
+                ALTER TABLE utxos ADD COLUMN IF NOT EXISTS submit_mask SMALLINT NOT NULL DEFAULT 1
+            """)
+
         self._initialized = True
         logger.info("UTXO manager initialized")
 
@@ -251,6 +258,7 @@ class UTXOManager:
         value_sat: int,
         utxo_role: str = UTXO_ROLE_POOL,
         pending: bool = False,
+        submit_mask: int = 1,
     ) -> None:
         """
         Add a tracked UTXO. Default role `pool` (vessel spends). Use `reserve` for fan-out funding.
@@ -264,6 +272,9 @@ class UTXOManager:
                 Pending rows are never handed out by acquire_utxo; the reaper
                 promotes them once the parent tx propagates, or quarantines
                 them if it dies.
+            submit_mask: Which ARC endpoints accepted the creating tx
+                (bit0=GorillaPool, bit1=TAAL). The reaper requires all of them
+                to report the promote status when PENDING_PROMOTE_QUORUM=2.
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
@@ -287,8 +298,8 @@ class UTXOManager:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
-                VALUES ($1, $2, $3, $4, FALSE, $5)
+                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
+                VALUES ($1, $2, $3, $4, FALSE, $5, $6)
                 ON CONFLICT (txid, vout) DO NOTHING
                 """,
                 txid,
@@ -296,6 +307,7 @@ class UTXOManager:
                 value_sat,
                 utxo_role,
                 pending,
+                submit_mask,
             )
 
         logger.debug(
@@ -323,6 +335,7 @@ class UTXOManager:
                 SELECT txid,
                        COUNT(*) AS outputs,
                        COALESCE(SUM(value_sat), 0) AS total_sat,
+                       COALESCE(MAX(submit_mask), 1) AS submit_mask,
                        EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::INT AS age_seconds
                 FROM utxos
                 WHERE pending = TRUE
@@ -338,6 +351,7 @@ class UTXOManager:
                 "txid": str(r["txid"]),
                 "outputs": int(r["outputs"] or 0),
                 "total_sat": int(r["total_sat"] or 0),
+                "submit_mask": int(r["submit_mask"] or 1),
                 "age_seconds": int(r["age_seconds"] or 0),
             }
             for r in rows
@@ -867,10 +881,12 @@ class UTXOManager:
                     txid_arc,
                     txid_canon,
                 )
+            submit_mask = int(broadcast.get("submit_mask") or 1)
             logger.info(
-                "Fan-out broadcast via %s (status=%s)",
+                "Fan-out broadcast via %s (status=%s, submit_mask=%s)",
                 broadcast.get("broadcaster"),
                 broadcast.get("status"),
+                submit_mask,
             )
 
             async with self._pool.acquire() as conn:
@@ -890,22 +906,24 @@ class UTXOManager:
                     for vout in range(UTXO_POOL_TARGET):
                         await conn.execute(
                             """
-                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
-                            VALUES ($1, $2, $3, 'pool', FALSE, TRUE)
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
+                            VALUES ($1, $2, $3, 'pool', FALSE, TRUE, $4)
                             """,
                             txid,
                             vout,
                             UTXO_VALUE_EACH,
+                            submit_mask,
                         )
                     if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
                         await conn.execute(
                             """
-                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
-                            VALUES ($1, $2, $3, 'reserve', FALSE, TRUE)
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
+                            VALUES ($1, $2, $3, 'reserve', FALSE, TRUE, $4)
                             """,
                             txid,
                             UTXO_POOL_TARGET,
                             change_value,
+                            submit_mask,
                         )
 
             if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:

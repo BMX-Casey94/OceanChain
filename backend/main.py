@@ -32,12 +32,15 @@ from config import (
     LOG_SUMMARY_INTERVAL_SECONDS,
     LOG_SAMPLE_RAW_TX_PATH,
     PENDING_PROMOTE_STATUS,
+    PENDING_PROMOTE_QUORUM,
     PENDING_REAPER_INTERVAL_SECONDS,
     PENDING_REAPER_BATCH_SIZE,
     PENDING_REAPER_CONCURRENCY,
     PENDING_REAPER_BACKOFF_SECONDS,
     PENDING_MAX_AGE_SECONDS,
     PENDING_SPENDABLE_WATERMARK,
+    ARC_DUAL_BROADCAST,
+    TAAL_API_KEY,
     validate_config,
     get_config_summary,
 )
@@ -52,7 +55,7 @@ from tx_builder import (
 from utxo_manager import utxo_manager
 from broadcaster import (
     submit,
-    check_tx_status,
+    check_tx_status_all,
     arc_status_rank,
     is_final_failure_status,
     BroadcastError,
@@ -246,9 +249,16 @@ async def process_vessel(
             
             # Success: consume UTXO, add change output. Change enters as pending —
             # it only becomes spendable once this tx is seen on the network, so a
-            # dropped tx can never orphan a descendant chain.
+            # dropped tx can never orphan a descendant chain. The submit mask records
+            # which ARC endpoints hold the tx, setting the reaper's promote quorum.
             await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
-            await utxo_manager.add_utxo(txid, 1, change_value, pending=True)  # Change is output index 1
+            await utxo_manager.add_utxo(
+                txid,
+                1,
+                change_value,
+                pending=True,
+                submit_mask=int(result.get("submit_mask") or 1),
+            )  # Change is output index 1
             
             # Update stats
             record_tx(fee_sat)
@@ -289,7 +299,13 @@ async def process_vessel(
                 try:
                     txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
                     if txid_canon:
-                        await utxo_manager.add_utxo(txid_canon, 1, change_value, pending=True)
+                        await utxo_manager.add_utxo(
+                            txid_canon,
+                            1,
+                            change_value,
+                            pending=True,
+                            submit_mask=e.submit_mask or 1,
+                        )
                 except Exception as add_err:
                     logger.warning(
                         "Could not record change for unconfirmed tx %s: %s",
@@ -486,9 +502,11 @@ async def pending_reaper_loop() -> None:
 
     Change outputs and fan-out outputs enter the pool as pending (unspendable) so a
     tx Arcade accepted but never propagated cannot orphan a descendant chain. This
-    loop polls ARC off the hot path and flips rows to spendable at
-    PENDING_PROMOTE_STATUS, or deletes them on terminal failure / definitive absence
-    past PENDING_MAX_AGE_SECONDS. Transport errors are never treated as death.
+    loop polls every configured ARC endpoint off the hot path and flips rows to
+    spendable once the tx reaches PENDING_PROMOTE_STATUS on all endpoints that
+    accepted it (PENDING_PROMOTE_QUORUM=2), or deletes them on terminal failure /
+    definitive absence past PENDING_MAX_AGE_SECONDS. Transport errors are never
+    treated as death.
 
     Stuck not-yet-seen txids are backed off so they cannot occupy every oldest-first
     batch slot. The loop only sleeps when idle or when a pass made no progress.
@@ -528,36 +546,87 @@ async def pending_reaper_loop() -> None:
 
             semaphore = asyncio.Semaphore(PENDING_REAPER_CONCURRENCY)
 
+            def _promotable(status: Optional[str]) -> bool:
+                if not status:
+                    return False
+                rank = arc_status_rank(status)
+                # Orphan-mempool means the network sees the tx but not its parent;
+                # its outputs are not safely spendable until that resolves.
+                return (
+                    rank is not None
+                    and rank >= promote_rank
+                    and status != "SEEN_IN_ORPHAN_MEMPOOL"
+                )
+
             async def check_one(group: dict) -> dict:
                 txid = group["txid"]
                 async with semaphore:
-                    status = await check_tx_status(txid)
-                if status is None:
-                    return {"kind": "unknown", "txid": txid}
-                rank = arc_status_rank(status)
-                if (
-                    rank is not None
-                    and rank >= promote_rank
-                    # Orphan-mempool means the network sees the tx but not its parent;
-                    # its outputs are not safely spendable until that resolves.
-                    and status != "SEEN_IN_ORPHAN_MEMPOOL"
-                ):
-                    outputs = await utxo_manager.promote_pending_txid(txid)
-                    return {"kind": "promoted", "txid": txid, "outputs": outputs}
-                terminal = is_final_failure_status(status)
-                stale = (
-                    rank is None or rank < promote_rank or status == "SEEN_IN_ORPHAN_MEMPOOL"
-                ) and group["age_seconds"] >= PENDING_MAX_AGE_SECONDS
-                if terminal or stale:
+                    statuses = await check_tx_status_all(txid)
+
+                # Quorum: with PENDING_PROMOTE_QUORUM=2 every ARC endpoint that
+                # accepted the tx (submit_mask) must report the promote status —
+                # a single operator's SEEN can no longer unlock phantom change.
+                mask = int(group["submit_mask"] or 1)
+                if PENDING_PROMOTE_QUORUM >= 2:
+                    required = [
+                        name
+                        for name, bit in (("gorillapool", 1), ("taal", 2))
+                        if mask & bit
+                    ]
+                else:
+                    required = ["gorillapool"] if mask & 1 else ["taal"]
+                # An endpoint not configured right now cannot vouch; degrade to
+                # whatever was actually polled rather than stalling the coin.
+                required = [e for e in required if e in statuses] or list(statuses)
+
+                req_statuses = [statuses.get(e) for e in required]
+                req_promotable = [_promotable(s) for s in req_statuses]
+                terminal_seen = any(
+                    is_final_failure_status(s) for s in statuses.values() if s
+                )
+
+                # Terminal failure quarantines unless a required endpoint still
+                # reports the tx healthy (policy rejects are operator-specific;
+                # a genuine double-spend is rejected everywhere).
+                if terminal_seen and not any(req_promotable):
                     removed = await utxo_manager.quarantine_pending_txid(txid)
                     logger.warning(
                         "Quarantined %s pending output(s) of tx %s (%s sat, age %ss, "
-                        "status %s) — tx never propagated; value unrecoverable",
+                        "statuses %s) — terminal ARC failure; value unrecoverable",
                         removed,
                         txid[:16],
                         group["total_sat"],
                         group["age_seconds"],
-                        status,
+                        statuses,
+                    )
+                    return {
+                        "kind": "quarantined",
+                        "txid": txid,
+                        "sat": group["total_sat"],
+                    }
+
+                if all(req_promotable):
+                    outputs = await utxo_manager.promote_pending_txid(txid)
+                    return {"kind": "promoted", "txid": txid, "outputs": outputs}
+
+                # Any required endpoint unreachable/erroring: unknown — hold,
+                # never count towards the age-based quarantine.
+                if any(s is None for s in req_statuses):
+                    return {"kind": "unknown", "txid": txid}
+
+                # Every required endpoint answered definitively below the bar.
+                if group["age_seconds"] >= PENDING_MAX_AGE_SECONDS:
+                    removed = await utxo_manager.quarantine_pending_txid(txid)
+                    logger.warning(
+                        "Quarantined %s pending output(s) of tx %s (%s sat, age %ss, "
+                        "statuses %s) — never reached %s on %s; value unrecoverable",
+                        removed,
+                        txid[:16],
+                        group["total_sat"],
+                        group["age_seconds"],
+                        statuses,
+                        PENDING_PROMOTE_STATUS,
+                        required,
                     )
                     return {
                         "kind": "quarantined",
@@ -744,6 +813,11 @@ async def main() -> None:
     set_vessel_snapshot_provider(ais_client.get_current_snapshot)
     logger.info("Ocechain starting...")
     logger.info(f"Config: {get_config_summary()}")
+    if ARC_DUAL_BROADCAST and not TAAL_API_KEY:
+        logger.warning(
+            "ARC_DUAL_BROADCAST=1 but TAAL_API_KEY is not set — single-endpoint mode; "
+            "pending promotion degrades to GorillaPool-only (no propagation quorum)"
+        )
     
     # Initialize database
     db_pool = await init_database()
