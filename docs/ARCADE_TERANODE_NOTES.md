@@ -75,6 +75,7 @@
 
 - **Skip Gorilla retry on terminal rejection**: when Gorilla returns `REJECTED` or `DOUBLE_SPEND_ATTEMPTED`, the client no longer wastes a 2-second retry to the same endpoint. It falls through to TAAL immediately.
 - **Consume UTXO on submitted-but-failed broadcast**: if a tx was actually submitted to at least one ARC endpoint but all endpoints ultimately failed, the UTXO is consumed (burned) rather than released back to the pool. This prevents double-spend cascades where a released UTXO gets re-spent in a later batch while the original tx is still propagating.
+- **Pending-change gate (orphan-chain fix)**: change outputs and fan-out outputs now enter the pool as `pending` and are never handed out for spending until the creating tx reaches `PENDING_PROMOTE_STATUS` (default `SEEN_ON_NETWORK`). A background reaper polls ARC off the hot path and promotes or quarantines pending rows. This eliminates the observed failure mode where a parent accepted at `ACCEPTED_BY_NETWORK` never propagated (`PENDING_RETRY`, explorer 404) and every descendant built on its change was silently invalidated. Quarantine is always safe because pending rows are never spent, so no descendants can exist. Pool sizing must cover the in-flight window (`tx_rate × promotion_lag`); see `UTXO_POOL_TARGET` guidance in `backend/.env.example`.
 
 ## `POST /tx` vs `POST /txs`
 

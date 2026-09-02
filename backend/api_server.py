@@ -179,6 +179,8 @@ async def health_check() -> JSONResponse:
             "spendable_depth": -1,
             "spendable_balance": -1,
             "minimum_viable_utxo_value": -1,
+            "pending_depth": -1,
+            "pending_balance": -1,
         }
         reserve_metrics = {"reserve_count": -1, "reserve_total_sat": -1}
 
@@ -205,6 +207,8 @@ async def health_check() -> JSONResponse:
         "status": "ok",
         "pool_depth": pool_metrics["spendable_depth"],
         "pool_balance_sat": pool_metrics["spendable_balance"],
+        "pending_depth": pool_metrics["pending_depth"],
+        "pending_balance_sat": pool_metrics["pending_balance"],
         "minimum_viable_utxo_value": pool_metrics["minimum_viable_utxo_value"],
         "reserve_count": reserve_metrics["reserve_count"],
         "reserve_total_sat": reserve_metrics["reserve_total_sat"],
@@ -712,6 +716,8 @@ async def broadcast_utxo_event() -> None:
             "spendable_depth": -1,
             "spendable_balance": -1,
             "minimum_viable_utxo_value": -1,
+            "pending_depth": -1,
+            "pending_balance": -1,
         }
         reserve = {"reserve_count": -1, "reserve_total_sat": -1}
 
@@ -720,6 +726,8 @@ async def broadcast_utxo_event() -> None:
         "data": {
             "depth": metrics["spendable_depth"],
             "balance_sat": metrics["spendable_balance"],
+            "pending_depth": metrics["pending_depth"],
+            "pending_balance_sat": metrics["pending_balance"],
             "minimum_viable_utxo_value": metrics["minimum_viable_utxo_value"],
             "reserve_count": reserve["reserve_count"],
             "reserve_total_sat": reserve["reserve_total_sat"],

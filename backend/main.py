@@ -31,6 +31,11 @@ from config import (
     UTXO_AUTO_REFILL_ON_START,
     LOG_SUMMARY_INTERVAL_SECONDS,
     LOG_SAMPLE_RAW_TX_PATH,
+    PENDING_PROMOTE_STATUS,
+    PENDING_REAPER_INTERVAL_SECONDS,
+    PENDING_REAPER_BATCH_SIZE,
+    PENDING_REAPER_CONCURRENCY,
+    PENDING_MAX_AGE_SECONDS,
     validate_config,
     get_config_summary,
 )
@@ -43,7 +48,13 @@ from tx_builder import (
     to_extended_format_hex,
 )
 from utxo_manager import utxo_manager
-from broadcaster import submit, BroadcastError
+from broadcaster import (
+    submit,
+    check_tx_status,
+    arc_status_rank,
+    is_final_failure_status,
+    BroadcastError,
+)
 from broadcast_stats import broadcast_stats
 from logging_config import configure_quiet_loggers, vessel_log_label
 from api_server import (
@@ -231,9 +242,11 @@ async def process_vessel(
                 except OSError as werr:
                     logger.warning("Could not write LOG_SAMPLE_RAW_TX_PATH: %s", werr)
             
-            # Success: consume UTXO, add change output
+            # Success: consume UTXO, add change output. Change enters as pending —
+            # it only becomes spendable once this tx is seen on the network, so a
+            # dropped tx can never orphan a descendant chain.
             await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
-            await utxo_manager.add_utxo(txid, 1, change_value)  # Change is output index 1
+            await utxo_manager.add_utxo(txid, 1, change_value, pending=True)  # Change is output index 1
             
             # Update stats
             record_tx(fee_sat)
@@ -268,13 +281,13 @@ async def process_vessel(
             if e.tx_was_submitted:
                 await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
                 # The tx was submitted to at least one ARC endpoint. Its change output
-                # (index 1) is ours; track it so the pool does not silently drain even
-                # though the final status was never confirmed. If the tx never lands,
-                # this row is inert and can be cleaned up later.
+                # (index 1) is ours; track it as pending so the pool does not silently
+                # drain. The reaper promotes it if the tx lands and quarantines it if
+                # it is terminally dead — it is never spendable while unconfirmed.
                 try:
                     txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
                     if txid_canon:
-                        await utxo_manager.add_utxo(txid_canon, 1, change_value)
+                        await utxo_manager.add_utxo(txid_canon, 1, change_value, pending=True)
                 except Exception as add_err:
                     logger.warning(
                         "Could not record change for unconfirmed tx %s: %s",
@@ -350,16 +363,24 @@ async def broadcasting_loop() -> None:
 
             update_vessel_count(vessel_count)
 
-            pool_ready = await utxo_manager.pool_depth()
-            if pool_ready == 0:
-                logger.warning(
-                    "UTXO pool is empty (%s vessels in AIS snapshot). "
-                    "Register funding: curl -s -X POST http://127.0.0.1:%s/utxo/reserve "
-                    "-H 'Content-Type: application/json' "
-                    "-d '{\"txid\":\"...\",\"vout\":0,\"value_sat\":...}' then POST /utxo/refill.",
-                    vessel_count,
-                    VPS_API_PORT,
-                )
+            pool_metrics = await utxo_manager.pool_metrics()
+            if pool_metrics["spendable_depth"] == 0:
+                if pool_metrics["pending_depth"] > 0:
+                    logger.info(
+                        "No spendable UTXOs; waiting on %s pending coin(s) whose parent "
+                        "txs have not reached %s yet.",
+                        pool_metrics["pending_depth"],
+                        PENDING_PROMOTE_STATUS,
+                    )
+                else:
+                    logger.warning(
+                        "UTXO pool is empty (%s vessels in AIS snapshot). "
+                        "Register funding: curl -s -X POST http://127.0.0.1:%s/utxo/reserve "
+                        "-H 'Content-Type: application/json' "
+                        "-d '{\"txid\":\"...\",\"vout\":0,\"value_sat\":...}' then POST /utxo/refill.",
+                        vessel_count,
+                        VPS_API_PORT,
+                    )
                 await asyncio.sleep(BATCH_INTERVAL_SECONDS)
                 continue
 
@@ -435,6 +456,93 @@ async def broadcasting_loop() -> None:
         except Exception as e:
             logger.error(f"Error in broadcasting loop: {e}", exc_info=True)
             await asyncio.sleep(10)  # Brief pause before retry
+
+
+async def pending_reaper_loop() -> None:
+    """
+    Promote pending UTXOs once their creating tx propagates; quarantine the dead.
+
+    Change outputs and fan-out outputs enter the pool as pending (unspendable) so a
+    tx Arcade accepted but never propagated cannot orphan a descendant chain. This
+    loop polls ARC off the hot path and flips rows to spendable at
+    PENDING_PROMOTE_STATUS, or deletes them on terminal failure / definitive absence
+    past PENDING_MAX_AGE_SECONDS. Transport errors are never treated as death.
+    """
+    promote_rank = arc_status_rank(PENDING_PROMOTE_STATUS) or 8  # SEEN_ON_NETWORK
+
+    while True:
+        try:
+            groups = await utxo_manager.list_pending_txids(PENDING_REAPER_BATCH_SIZE)
+            if not groups:
+                await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
+                continue
+
+            semaphore = asyncio.Semaphore(PENDING_REAPER_CONCURRENCY)
+            promoted_txs = 0
+            promoted_outputs = 0
+            quarantined_txs = 0
+            quarantined_sat = 0
+            unknown = 0
+
+            async def check_one(group: dict) -> None:
+                nonlocal promoted_txs, promoted_outputs
+                nonlocal quarantined_txs, quarantined_sat, unknown
+                txid = group["txid"]
+                async with semaphore:
+                    status = await check_tx_status(txid)
+                if status is None:
+                    unknown += 1
+                    return
+                rank = arc_status_rank(status)
+                if (
+                    rank is not None
+                    and rank >= promote_rank
+                    # Orphan-mempool means the network sees the tx but not its parent;
+                    # its outputs are not safely spendable until that resolves.
+                    and status != "SEEN_IN_ORPHAN_MEMPOOL"
+                ):
+                    promoted_txs += 1
+                    promoted_outputs += await utxo_manager.promote_pending_txid(txid)
+                    return
+                terminal = is_final_failure_status(status)
+                stale = (
+                    rank is None or rank < promote_rank or status == "SEEN_IN_ORPHAN_MEMPOOL"
+                ) and group["age_seconds"] >= PENDING_MAX_AGE_SECONDS
+                if terminal or stale:
+                    quarantined_txs += 1
+                    quarantined_sat += group["total_sat"]
+                    removed = await utxo_manager.quarantine_pending_txid(txid)
+                    logger.warning(
+                        "Quarantined %s pending output(s) of tx %s (%s sat, age %ss, "
+                        "status %s) — tx never propagated; value unrecoverable",
+                        removed,
+                        txid[:16],
+                        group["total_sat"],
+                        group["age_seconds"],
+                        status,
+                    )
+
+            await asyncio.gather(*(check_one(g) for g in groups))
+
+            logger.info(
+                "Pending reaper: promoted=%s txs/%s outputs, quarantined=%s txs "
+                "(%s sat), waiting=%s, unknown=%s",
+                promoted_txs,
+                promoted_outputs,
+                quarantined_txs,
+                quarantined_sat,
+                len(groups) - promoted_txs - quarantined_txs - unknown,
+                unknown,
+            )
+            await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
+
+        except asyncio.CancelledError:
+            logger.info("Pending reaper shutdown")
+            raise
+
+        except Exception as e:
+            logger.error(f"Error in pending reaper: {e}", exc_info=True)
+            await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
 
 
 async def log_summary_loop() -> None:
@@ -610,6 +718,7 @@ async def main() -> None:
         asyncio.create_task(ais_client.run(), name="ais_client"),
         asyncio.create_task(broadcasting_loop(), name="broadcasting_loop"),
         asyncio.create_task(utxo_manager.monitor_loop(), name="utxo_monitor"),
+        asyncio.create_task(pending_reaper_loop(), name="pending_reaper"),
         asyncio.create_task(run_api_server(), name="api_server"),
     ]
     if LOG_SUMMARY_INTERVAL_SECONDS > 0:

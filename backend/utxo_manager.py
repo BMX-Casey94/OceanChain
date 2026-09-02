@@ -107,6 +107,12 @@ class UTXOManager:
                 ALTER TABLE utxos ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ
             """)
 
+            # Pending gate: TRUE = created by a tx not yet seen on the network.
+            # Existing rows default FALSE (spendable), so live pools migrate cleanly.
+            await conn.execute("""
+                ALTER TABLE utxos ADD COLUMN IF NOT EXISTS pending BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+
         self._initialized = True
         logger.info("UTXO manager initialized")
 
@@ -140,7 +146,8 @@ class UTXOManager:
                 UPDATE utxos SET locked = TRUE, locked_at = NOW()
                 WHERE (txid, vout) = (
                     SELECT txid, vout FROM utxos
-                    WHERE locked = FALSE AND utxo_role = 'pool' AND value_sat >= $1
+                    WHERE locked = FALSE AND pending = FALSE
+                      AND utxo_role = 'pool' AND value_sat >= $1
                     ORDER BY created_at ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
@@ -243,6 +250,7 @@ class UTXOManager:
         vout: int,
         value_sat: int,
         utxo_role: str = UTXO_ROLE_POOL,
+        pending: bool = False,
     ) -> None:
         """
         Add a tracked UTXO. Default role `pool` (vessel spends). Use `reserve` for fan-out funding.
@@ -252,6 +260,10 @@ class UTXOManager:
             vout: Output index
             value_sat: Value in satoshis
             utxo_role: `pool` or `reserve`
+            pending: True when the creating tx is not yet seen on the network.
+                Pending rows are never handed out by acquire_utxo; the reaper
+                promotes them once the parent tx propagates, or quarantines
+                them if it dies.
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
@@ -275,17 +287,98 @@ class UTXOManager:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
-                VALUES ($1, $2, $3, $4, FALSE)
+                INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
+                VALUES ($1, $2, $3, $4, FALSE, $5)
                 ON CONFLICT (txid, vout) DO NOTHING
                 """,
                 txid,
                 vout,
                 value_sat,
                 utxo_role,
+                pending,
             )
 
-        logger.debug("Added UTXO %s:%s (%s sat) role=%s", txid, vout, value_sat, utxo_role)
+        logger.debug(
+            "Added UTXO %s:%s (%s sat) role=%s pending=%s",
+            txid[:16],
+            vout,
+            value_sat,
+            utxo_role,
+            pending,
+        )
+
+    async def list_pending_txids(self, limit: int) -> list[dict[str, Any]]:
+        """
+        Distinct creating txids with pending outputs, oldest-first.
+
+        Grouped by txid because one fan-out creates thousands of pending rows that
+        share a single creating tx — one ARC poll settles all of them at once.
+        """
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT txid,
+                       COUNT(*) AS outputs,
+                       COALESCE(SUM(value_sat), 0) AS total_sat,
+                       EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::INT AS age_seconds
+                FROM utxos
+                WHERE pending = TRUE
+                GROUP BY txid
+                ORDER BY MIN(created_at) ASC
+                LIMIT $1
+                """,
+                limit,
+            )
+
+        return [
+            {
+                "txid": str(r["txid"]),
+                "outputs": int(r["outputs"] or 0),
+                "total_sat": int(r["total_sat"] or 0),
+                "age_seconds": int(r["age_seconds"] or 0),
+            }
+            for r in rows
+        ]
+
+    async def promote_pending_txid(self, txid: str) -> int:
+        """
+        Mark every pending output of a creating tx spendable (tx is now seen on-network).
+        Returns the number of rows promoted.
+        """
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE utxos SET pending = FALSE WHERE txid = $1 AND pending = TRUE",
+                txid,
+            )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def quarantine_pending_txid(self, txid: str) -> int:
+        """
+        Delete every pending output of a creating tx that is terminally dead or never
+        propagated. Safe by construction: pending rows are never spent, so no
+        descendant can exist. Returns the number of rows removed.
+        """
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM utxos WHERE txid = $1 AND pending = TRUE",
+                txid,
+            )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
     async def register_reserve_utxo(self, txid: str, vout: int, value_sat: int) -> None:
         """
@@ -480,18 +573,26 @@ class UTXOManager:
             row = await conn.fetchrow(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE locked = FALSE) AS unlocked_depth,
-                    COALESCE(SUM(value_sat) FILTER (WHERE locked = FALSE), 0) AS unlocked_balance,
+                    COUNT(*) FILTER (WHERE locked = FALSE AND pending = FALSE) AS unlocked_depth,
+                    COALESCE(SUM(value_sat) FILTER (WHERE locked = FALSE AND pending = FALSE), 0) AS unlocked_balance,
                     COUNT(*) FILTER (
-                        WHERE locked = FALSE AND value_sat >= $1
+                        WHERE locked = FALSE AND pending = FALSE AND value_sat >= $1
                     ) AS spendable_depth,
                     COALESCE(SUM(value_sat) FILTER (
-                        WHERE locked = FALSE AND value_sat >= $1
+                        WHERE locked = FALSE AND pending = FALSE AND value_sat >= $1
                     ), 0) AS spendable_balance
                 FROM utxos
                 WHERE utxo_role = 'pool'
                 """,
                 minimum_value,
+            )
+            pending_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS pending_depth,
+                       COALESCE(SUM(value_sat), 0) AS pending_balance
+                FROM utxos
+                WHERE pending = TRUE
+                """
             )
 
         return {
@@ -500,6 +601,8 @@ class UTXOManager:
             "unlocked_balance": int(row["unlocked_balance"] or 0),
             "spendable_depth": int(row["spendable_depth"] or 0),
             "spendable_balance": int(row["spendable_balance"] or 0),
+            "pending_depth": int(pending_row["pending_depth"] or 0),
+            "pending_balance": int(pending_row["pending_balance"] or 0),
         }
 
     async def reserve_funding_metrics(self) -> dict[str, int]:
@@ -511,8 +614,8 @@ class UTXOManager:
             row = await conn.fetchrow(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE locked = FALSE) AS n,
-                    COALESCE(SUM(value_sat) FILTER (WHERE locked = FALSE), 0) AS total_sat
+                    COUNT(*) FILTER (WHERE locked = FALSE AND pending = FALSE) AS n,
+                    COALESCE(SUM(value_sat) FILTER (WHERE locked = FALSE AND pending = FALSE), 0) AS total_sat
                 FROM utxos
                 WHERE utxo_role = 'reserve'
                 """
@@ -540,7 +643,7 @@ class UTXOManager:
                 """
                 SELECT txid, vout, value_sat
                 FROM utxos
-                WHERE utxo_role = 'reserve' AND locked = FALSE
+                WHERE utxo_role = 'reserve' AND locked = FALSE AND pending = FALSE
                 ORDER BY value_sat DESC
                 """
             )
@@ -781,11 +884,14 @@ class UTXOManager:
                             u["txid"],
                             u["vout"],
                         )
+                    # New outputs enter as pending: the fan-out tx itself is still
+                    # zero-conf, so spending them immediately would start an orphan
+                    # chain if it never propagates. The reaper promotes on SEEN.
                     for vout in range(UTXO_POOL_TARGET):
                         await conn.execute(
                             """
-                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
-                            VALUES ($1, $2, $3, 'pool', FALSE)
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
+                            VALUES ($1, $2, $3, 'pool', FALSE, TRUE)
                             """,
                             txid,
                             vout,
@@ -794,8 +900,8 @@ class UTXOManager:
                     if add_change_output and change_value >= MIN_CHANGE_OUTPUT_SAT:
                         await conn.execute(
                             """
-                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
-                            VALUES ($1, $2, $3, 'reserve', FALSE)
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending)
+                            VALUES ($1, $2, $3, 'reserve', FALSE, TRUE)
                             """,
                             txid,
                             UTXO_POOL_TARGET,
@@ -838,19 +944,28 @@ class UTXOManager:
                     (UTXO_POOL_TARGET * UTXO_VALUE_EACH) // 2,
                 )
 
+                # Pending coins are inbound liquidity awaiting network propagation of
+                # their creating tx. Counting them prevents duplicate refills during
+                # the promotion window right after a fan-out.
+                effective_depth = metrics["spendable_depth"] + metrics["pending_depth"]
+                effective_balance = metrics["spendable_balance"] + metrics["pending_balance"]
+
                 logger.info(
                     "UTXO pool metrics: spendable_depth=%s unlocked_depth=%s "
-                    "spendable_balance=%s threshold_depth=%s threshold_value=%s",
+                    "spendable_balance=%s pending_depth=%s pending_balance=%s "
+                    "threshold_depth=%s threshold_value=%s",
                     metrics["spendable_depth"],
                     metrics["unlocked_depth"],
                     metrics["spendable_balance"],
+                    metrics["pending_depth"],
+                    metrics["pending_balance"],
                     depth_threshold,
                     value_threshold,
                 )
 
                 if (
-                    metrics["spendable_depth"] < depth_threshold
-                    or metrics["spendable_balance"] < value_threshold
+                    effective_depth < depth_threshold
+                    or effective_balance < value_threshold
                 ):
                     now = time.monotonic()
                     if (

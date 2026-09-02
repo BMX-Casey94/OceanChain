@@ -594,6 +594,85 @@ async def submit(
     )
 
 
+def arc_status_rank(status: str) -> Optional[int]:
+    """Propagation rank for a normalised ARC status, or None if unranked."""
+    return _ARC_STATUS_RANK.get(status)
+
+
+def is_final_failure_status(status: str) -> bool:
+    """True when ARC will never accept the tx (safe to quarantine its outputs)."""
+    return status in _ARC_FINAL_FAILURE_STATUSES
+
+
+async def check_tx_status(txid: str) -> Optional[str]:
+    """
+    Single lightweight status poll for one tx — no retries, no submit.
+
+    Used by the pending-coin reaper to learn whether an accepted tx actually
+    propagated. GorillaPool first; TAAL as fallback when configured (a tx that
+    went out via TAAL fallback may not be known to Gorilla yet).
+
+    Returns the normalised txStatus string ("SEEN_ON_NETWORK", "PENDING_RETRY",
+    "NOT_FOUND", …) or None on transport/HTTP errors — callers must treat None
+    as "unknown, try again later", never as dead.
+    """
+    endpoints: list[tuple[str, str, Optional[str]]] = [("gorillapool", GORILLA_ARC_URL, None)]
+    if TAAL_API_KEY:
+        endpoints.append(("taal", TAAL_ARC_URL, TAAL_API_KEY))
+
+    saw_not_found = False
+    saw_transport_error = False
+
+    async with httpx.AsyncClient() as client:
+        for broadcaster_name, submit_url, api_key in endpoints:
+            headers: dict[str, str] = {"Accept": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            try:
+                response = await client.get(
+                    _status_url(submit_url, txid),
+                    headers=headers,
+                    timeout=10.0,
+                )
+            except httpx.HTTPError as exc:
+                saw_transport_error = True
+                _arc_detail(
+                    "Status check via %s failed for %s: %s",
+                    broadcaster_name,
+                    txid[:16],
+                    exc,
+                )
+                continue
+
+            if response.status_code == 404:
+                saw_not_found = True
+                continue
+            if response.status_code >= 400:
+                saw_transport_error = True
+                _arc_detail(
+                    "Status check via %s HTTP %s for %s",
+                    broadcaster_name,
+                    response.status_code,
+                    txid[:16],
+                )
+                continue
+
+            try:
+                data = response.json()
+            except ValueError:
+                saw_transport_error = True
+                continue
+            _, _, tx_status = _extract_arc_response(data)
+            if tx_status:
+                return tx_status
+
+    # Definitive "no endpoint knows this tx" only when nothing errored — a transport
+    # failure must never be read as proof of death.
+    if saw_not_found and not saw_transport_error:
+        return "NOT_FOUND"
+    return None
+
+
 async def submit_raw(raw_tx_hex: str) -> str:
     """
     Thin wrapper for fan-out transactions - GorillaPool Arcade only, no fallback.

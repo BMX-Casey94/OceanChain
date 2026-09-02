@@ -140,6 +140,21 @@ BROADCAST_POSITION_JUMP_NM: float = float(os.getenv("BROADCAST_POSITION_JUMP_NM"
 ARC_WAIT_FOR_STATUS: str = os.getenv("ARC_WAIT_FOR_STATUS", "ACCEPTED_BY_NETWORK").strip().upper()
 # Maximum seconds to wait for ARC status polling before retry/failover.
 ARC_MAX_TIMEOUT_SECONDS: int = int(os.getenv("ARC_MAX_TIMEOUT_SECONDS", "10"))
+
+# Pending-change gate: change outputs from accepted-but-not-yet-propagated txs enter the
+# pool as pending and only become spendable once the creating tx reaches this ARC status.
+# Prevents orphan chains built on parents Arcade accepted but never propagated (the
+# PENDING_RETRY / WoC-404 failure mode). Must be SEEN_ON_NETWORK or later to be meaningful.
+PENDING_PROMOTE_STATUS: str = os.getenv("PENDING_PROMOTE_STATUS", "SEEN_ON_NETWORK").strip().upper()
+# Reaper cadence and batching for promotion polls (off the broadcast hot path).
+# Batch counts distinct creating txids, so one fan-out's outputs poll as a single tx.
+# Capacity must exceed the tx creation rate: 500 txids / 10s = 50 tx/s > ~26 tx/s peak.
+PENDING_REAPER_INTERVAL_SECONDS: int = int(os.getenv("PENDING_REAPER_INTERVAL_SECONDS", "10"))
+PENDING_REAPER_BATCH_SIZE: int = int(os.getenv("PENDING_REAPER_BATCH_SIZE", "500"))
+PENDING_REAPER_CONCURRENCY: int = int(os.getenv("PENDING_REAPER_CONCURRENCY", "50"))
+# Quarantine a pending coin whose tx is still unseen this long after creation. Transport
+# errors never count toward this — only definitive not-found / low-status answers do.
+PENDING_MAX_AGE_SECONDS: int = int(os.getenv("PENDING_MAX_AGE_SECONDS", "3600"))
 # Periodic INFO log: successes/failures/samples (seconds). Set 0 to disable the summary task.
 LOG_SUMMARY_INTERVAL_SECONDS: int = int(os.getenv("LOG_SUMMARY_INTERVAL_SECONDS", "120"))
 # Per-HTTP-request ARC logs at INFO when true; otherwise DEBUG only (summary still INFO).
@@ -300,6 +315,28 @@ def validate_config() -> list[str]:
             "ARC_WAIT_FOR_STATUS must be one of: "
             + ", ".join(sorted(allowed_arc_wait))
         )
+
+    # Promotion below SEEN_ON_NETWORK reintroduces the orphan-chain failure mode.
+    allowed_promote = {
+        "SEEN_ON_NETWORK",
+        "SEEN_IN_ORPHAN_MEMPOOL",
+        "MINED",
+        "CONFIRMED",
+        "IMMUTABLE",
+    }
+    if PENDING_PROMOTE_STATUS not in allowed_promote:
+        errors.append(
+            "PENDING_PROMOTE_STATUS must be one of: "
+            + ", ".join(sorted(allowed_promote))
+        )
+    if PENDING_REAPER_INTERVAL_SECONDS < 5:
+        errors.append("PENDING_REAPER_INTERVAL_SECONDS must be >= 5")
+    if PENDING_REAPER_BATCH_SIZE < 1:
+        errors.append("PENDING_REAPER_BATCH_SIZE must be >= 1")
+    if PENDING_REAPER_CONCURRENCY < 1 or PENDING_REAPER_CONCURRENCY > 100:
+        errors.append("PENDING_REAPER_CONCURRENCY must be between 1 and 100")
+    if PENDING_MAX_AGE_SECONDS < 60:
+        errors.append("PENDING_MAX_AGE_SECONDS must be >= 60")
     if ARC_MAX_TIMEOUT_SECONDS < 1:
         errors.append("ARC_MAX_TIMEOUT_SECONDS must be >= 1")
     elif ARC_MAX_TIMEOUT_SECONDS > 30:
@@ -343,6 +380,9 @@ def get_config_summary() -> dict:
         "broadcast_concurrency": BROADCAST_CONCURRENCY,
         "arc_wait_for_status": ARC_WAIT_FOR_STATUS,
         "arc_max_timeout_seconds": ARC_MAX_TIMEOUT_SECONDS,
+        "pending_promote_status": PENDING_PROMOTE_STATUS,
+        "pending_reaper_interval_seconds": PENDING_REAPER_INTERVAL_SECONDS,
+        "pending_max_age_seconds": PENDING_MAX_AGE_SECONDS,
         "vps_api_port": VPS_API_PORT,
         "fee_rate_sat_per_kb": FEE_RATE_SAT_PER_KB,
         "min_tx_fee_sat": MIN_TX_FEE_SAT,
