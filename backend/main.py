@@ -35,7 +35,9 @@ from config import (
     PENDING_REAPER_INTERVAL_SECONDS,
     PENDING_REAPER_BATCH_SIZE,
     PENDING_REAPER_CONCURRENCY,
+    PENDING_REAPER_BACKOFF_SECONDS,
     PENDING_MAX_AGE_SECONDS,
+    PENDING_SPENDABLE_WATERMARK,
     validate_config,
     get_config_summary,
 )
@@ -364,12 +366,14 @@ async def broadcasting_loop() -> None:
             update_vessel_count(vessel_count)
 
             pool_metrics = await utxo_manager.pool_metrics()
-            if pool_metrics["spendable_depth"] == 0:
-                if pool_metrics["pending_depth"] > 0:
+            spendable = pool_metrics["spendable_depth"]
+            pending = pool_metrics["pending_depth"]
+            if spendable == 0:
+                if pending > 0:
                     logger.info(
                         "No spendable UTXOs; waiting on %s pending coin(s) whose parent "
                         "txs have not reached %s yet.",
-                        pool_metrics["pending_depth"],
+                        pending,
                         PENDING_PROMOTE_STATUS,
                     )
                 else:
@@ -383,6 +387,22 @@ async def broadcasting_loop() -> None:
                     )
                 await asyncio.sleep(BATCH_INTERVAL_SECONDS)
                 continue
+
+            # Hold a reserve of spendable coins while change is still in flight,
+            # so a 450-wide burst cannot drain the pool before the reaper promotes.
+            usable = spendable
+            if pending > 0 and PENDING_SPENDABLE_WATERMARK > 0:
+                usable = spendable - PENDING_SPENDABLE_WATERMARK
+                if usable <= 0:
+                    logger.info(
+                        "Spendable depth %s at or below watermark %s with %s pending; "
+                        "pausing broadcasts for the reaper.",
+                        spendable,
+                        PENDING_SPENDABLE_WATERMARK,
+                        pending,
+                    )
+                    await asyncio.sleep(2)
+                    continue
 
             now = time.time()
             due_items = [
@@ -399,9 +419,11 @@ async def broadcasting_loop() -> None:
             # Longest-waiting first; never-broadcast vessels (due=0) ahead of all.
             due_items.sort(key=lambda item: _next_due_by_mmsi.get(item[0], 0.0))
 
-            # Attempt at most BROADCAST_CONCURRENCY vessels this pass. Vessels
-            # past the slice stay due and are picked up on the next pass.
-            batch = due_items[:BROADCAST_CONCURRENCY]
+            # Attempt at most BROADCAST_CONCURRENCY vessels this pass, and never
+            # more than the spendable coins we can use without breaching the
+            # watermark. Vessels past the slice stay due for the next pass.
+            batch_limit = min(BROADCAST_CONCURRENCY, usable)
+            batch = due_items[:batch_limit]
 
             logger.debug(
                 "Scheduler: %s vessels in snapshot, %s due, attempting %s (pool depth %s)",
@@ -467,32 +489,51 @@ async def pending_reaper_loop() -> None:
     loop polls ARC off the hot path and flips rows to spendable at
     PENDING_PROMOTE_STATUS, or deletes them on terminal failure / definitive absence
     past PENDING_MAX_AGE_SECONDS. Transport errors are never treated as death.
+
+    Stuck not-yet-seen txids are backed off so they cannot occupy every oldest-first
+    batch slot. The loop only sleeps when idle or when a pass made no progress.
     """
     promote_rank = arc_status_rank(PENDING_PROMOTE_STATUS) or 8  # SEEN_ON_NETWORK
+    # txid -> monotonic deadline; skip until then (head-of-line protection).
+    backoff_until: dict[str, float] = {}
 
     while True:
         try:
-            groups = await utxo_manager.list_pending_txids(PENDING_REAPER_BATCH_SIZE)
+            now_mono = time.monotonic()
+            if backoff_until:
+                backoff_until = {
+                    txid: deadline
+                    for txid, deadline in backoff_until.items()
+                    if deadline > now_mono
+                }
+
+            # Over-fetch so backed-off orphans do not fill the whole poll batch.
+            candidates = await utxo_manager.list_pending_txids(
+                PENDING_REAPER_BATCH_SIZE * 4
+            )
+            if not candidates:
+                await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
+                continue
+
+            ready = [
+                g for g in candidates
+                if backoff_until.get(g["txid"], 0.0) <= now_mono
+            ]
+            skipped_backoff = len(candidates) - len(ready)
+            groups = ready[:PENDING_REAPER_BATCH_SIZE]
+
             if not groups:
                 await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
                 continue
 
             semaphore = asyncio.Semaphore(PENDING_REAPER_CONCURRENCY)
-            promoted_txs = 0
-            promoted_outputs = 0
-            quarantined_txs = 0
-            quarantined_sat = 0
-            unknown = 0
 
-            async def check_one(group: dict) -> None:
-                nonlocal promoted_txs, promoted_outputs
-                nonlocal quarantined_txs, quarantined_sat, unknown
+            async def check_one(group: dict) -> dict:
                 txid = group["txid"]
                 async with semaphore:
                     status = await check_tx_status(txid)
                 if status is None:
-                    unknown += 1
-                    return
+                    return {"kind": "unknown", "txid": txid}
                 rank = arc_status_rank(status)
                 if (
                     rank is not None
@@ -501,16 +542,13 @@ async def pending_reaper_loop() -> None:
                     # its outputs are not safely spendable until that resolves.
                     and status != "SEEN_IN_ORPHAN_MEMPOOL"
                 ):
-                    promoted_txs += 1
-                    promoted_outputs += await utxo_manager.promote_pending_txid(txid)
-                    return
+                    outputs = await utxo_manager.promote_pending_txid(txid)
+                    return {"kind": "promoted", "txid": txid, "outputs": outputs}
                 terminal = is_final_failure_status(status)
                 stale = (
                     rank is None or rank < promote_rank or status == "SEEN_IN_ORPHAN_MEMPOOL"
                 ) and group["age_seconds"] >= PENDING_MAX_AGE_SECONDS
                 if terminal or stale:
-                    quarantined_txs += 1
-                    quarantined_sat += group["total_sat"]
                     removed = await utxo_manager.quarantine_pending_txid(txid)
                     logger.warning(
                         "Quarantined %s pending output(s) of tx %s (%s sat, age %ss, "
@@ -521,19 +559,56 @@ async def pending_reaper_loop() -> None:
                         group["age_seconds"],
                         status,
                     )
+                    return {
+                        "kind": "quarantined",
+                        "txid": txid,
+                        "sat": group["total_sat"],
+                    }
+                return {"kind": "waiting", "txid": txid}
 
-            await asyncio.gather(*(check_one(g) for g in groups))
+            results = await asyncio.gather(*(check_one(g) for g in groups))
+
+            promoted_txs = 0
+            promoted_outputs = 0
+            quarantined_txs = 0
+            quarantined_sat = 0
+            unknown = 0
+            waiting = 0
+            for result in results:
+                kind = result["kind"]
+                if kind == "promoted":
+                    if result["outputs"]:
+                        promoted_txs += 1
+                        promoted_outputs += result["outputs"]
+                elif kind == "quarantined":
+                    quarantined_txs += 1
+                    quarantined_sat += result["sat"]
+                elif kind == "unknown":
+                    unknown += 1
+                    backoff_until[result["txid"]] = (
+                        time.monotonic() + min(5.0, PENDING_REAPER_BACKOFF_SECONDS)
+                    )
+                else:
+                    waiting += 1
+                    backoff_until[result["txid"]] = (
+                        time.monotonic() + PENDING_REAPER_BACKOFF_SECONDS
+                    )
 
             logger.info(
                 "Pending reaper: promoted=%s txs/%s outputs, quarantined=%s txs "
-                "(%s sat), waiting=%s, unknown=%s",
+                "(%s sat), waiting=%s, unknown=%s, skipped_backoff=%s",
                 promoted_txs,
                 promoted_outputs,
                 quarantined_txs,
                 quarantined_sat,
-                len(groups) - promoted_txs - quarantined_txs - unknown,
+                waiting,
                 unknown,
+                skipped_backoff,
             )
+
+            made_progress = promoted_outputs > 0 or quarantined_txs > 0
+            if made_progress:
+                continue
             await asyncio.sleep(PENDING_REAPER_INTERVAL_SECONDS)
 
         except asyncio.CancelledError:
