@@ -8,7 +8,7 @@
   - `ef`: BIP-239 Transaction Extended Format (TEF) hex in `rawTx`,
   - `auto`: prefer EF when context is available, else raw.
 - TAAL submissions remain standard raw tx hex for now.
-- The client polls `GET /tx/{txid}` and only counts success once ARC reaches `SEEN_ON_NETWORK` (or a later status).
+- The client polls `GET /tx/{txid}` and counts success once ARC reaches `ARC_WAIT_FOR_STATUS` (default `ACCEPTED_BY_NETWORK` — mempool acceptance, *not* a propagation guarantee). Separately, the pending-coin reaper gates change reuse on `PENDING_PROMOTE_STATUS` (default `SEEN_ON_NETWORK`).
 - Vessel broadcasts use many parallel `POST /tx` calls.
 - Fan-out refills use the same broadcaster path, but far less frequently.
 

@@ -317,9 +317,10 @@ def validate_config() -> list[str]:
         )
 
     # Promotion below SEEN_ON_NETWORK reintroduces the orphan-chain failure mode.
+    # SEEN_IN_ORPHAN_MEMPOOL is deliberately excluded: the network sees the tx but
+    # not its parent, so its outputs are not safely spendable.
     allowed_promote = {
         "SEEN_ON_NETWORK",
-        "SEEN_IN_ORPHAN_MEMPOOL",
         "MINED",
         "CONFIRMED",
         "IMMUTABLE",
