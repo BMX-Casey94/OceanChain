@@ -305,6 +305,7 @@ def validate_config() -> list[str]:
         "SENT_TO_NETWORK",
         "ACCEPTED_BY_NETWORK",
         "SEEN_ON_NETWORK",
+        "SEEN_MULTIPLE_NODES",
         "SEEN_IN_ORPHAN_MEMPOOL",
         "MINED",
         "CONFIRMED",
@@ -317,10 +318,13 @@ def validate_config() -> list[str]:
         )
 
     # Promotion below SEEN_ON_NETWORK reintroduces the orphan-chain failure mode.
-    # SEEN_IN_ORPHAN_MEMPOOL is deliberately excluded: the network sees the tx but
-    # not its parent, so its outputs are not safely spendable.
+    # SEEN_MULTIPLE_NODES is a stronger signal than SEEN_ON_NETWORK (seen by more
+    # than one node) and is equally safe to promote on. SEEN_IN_ORPHAN_MEMPOOL is
+    # deliberately excluded: the network sees the tx but not its parent, so its
+    # outputs are not safely spendable.
     allowed_promote = {
         "SEEN_ON_NETWORK",
+        "SEEN_MULTIPLE_NODES",
         "MINED",
         "CONFIRMED",
         "IMMUTABLE",
