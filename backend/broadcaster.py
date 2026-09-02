@@ -27,6 +27,7 @@ from config import (
     VERBOSE_ARC_LOGS,
 )
 from broadcast_stats import broadcast_stats
+from http_client import pooled_client
 
 logger = logging.getLogger(__name__)
 
@@ -274,13 +275,13 @@ async def _poll_arc_status(
                 timeout=min(10.0, max(1.0, remaining)),
             )
         except httpx.HTTPError as exc:
-            last_status = f"status_check_error:{exc}"
+            last_status = f"status_check_error:{_safe_exc_text(exc)}"
             _arc_detail(
                 "ARC status poll via %s failed: attempt=%s txid=%s error=%s",
                 broadcaster_name,
                 poll_attempt,
                 txid,
-                exc,
+                _safe_exc_text(exc),
             )
             delay_seconds = min(delay_seconds * 1.5, 2.0)
             continue
@@ -583,7 +584,7 @@ async def _submit_sequential(
     taal_error: Optional[str] = None
     submit_mask = 0
     
-    async with httpx.AsyncClient() as client:
+    async with pooled_client() as client:
         gorilla_submit_enabled = True
         selected_gorilla_tx_hex = raw_tx_hex
         try:
@@ -712,7 +713,7 @@ async def _submit_dual(
     gorilla_error: Optional[str] = None
     taal_error: Optional[str] = None
 
-    async with httpx.AsyncClient() as client:
+    async with pooled_client() as client:
         gorilla_submit_enabled = True
         selected_gorilla_tx_hex = raw_tx_hex
         try:
@@ -888,7 +889,7 @@ async def check_tx_status(txid: str) -> Optional[str]:
     saw_not_found = False
     saw_transport_error = False
 
-    async with httpx.AsyncClient() as client:
+    async with pooled_client() as client:
         for broadcaster_name, submit_url, api_key in endpoints:
             headers: dict[str, str] = {"Accept": "application/json"}
             if api_key:
@@ -905,7 +906,7 @@ async def check_tx_status(txid: str) -> Optional[str]:
                     "Status check via %s failed for %s: %s",
                     broadcaster_name,
                     txid[:16],
-                    exc,
+                    _safe_exc_text(exc),
                 )
                 continue
 
@@ -965,7 +966,7 @@ async def _get_status_one(
             "Status check via %s failed for %s: %s",
             broadcaster_name,
             txid[:16],
-            exc,
+            _safe_exc_text(exc),
         )
         return None
 
@@ -1003,7 +1004,7 @@ async def check_tx_status_all(txid: str) -> dict[str, Optional[str]]:
     if TAAL_API_KEY:
         endpoints.append(("taal", TAAL_ARC_URL, TAAL_API_KEY))
 
-    async with httpx.AsyncClient() as client:
+    async with pooled_client() as client:
         results = await asyncio.gather(
             *(
                 _get_status_one(client, name, url, key, txid)
@@ -1029,7 +1030,7 @@ async def submit_raw(raw_tx_hex: str) -> str:
     Raises:
         Exception on failure (no fallback)
     """
-    async with httpx.AsyncClient() as client:
+    async with pooled_client() as client:
         result = await _submit_to_arc(
             client, GORILLA_ARC_URL, raw_tx_hex, "gorillapool"
         )

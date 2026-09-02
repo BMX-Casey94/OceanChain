@@ -60,6 +60,7 @@ from broadcaster import (
     is_final_failure_status,
     BroadcastError,
 )
+from http_client import close_client
 from broadcast_stats import broadcast_stats
 from logging_config import configure_quiet_loggers, vessel_log_label
 from api_server import (
@@ -792,6 +793,10 @@ async def shutdown(pool: asyncpg.Pool, tasks: list[asyncio.Task]) -> None:
     # Close database pool
     await pool.close()
     logger.info("Database pool closed")
+
+    # Close the shared HTTP client (keep-alive pool)
+    await close_client()
+    logger.info("HTTP client closed")
 
 
 async def main() -> None:

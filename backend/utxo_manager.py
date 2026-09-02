@@ -11,8 +11,8 @@ import time
 from typing import Any, Optional, Tuple
 
 import asyncpg
-import httpx
 
+from http_client import pooled_client
 from config import (
     UTXO_POOL_TARGET,
     UTXO_VALUE_EACH,
@@ -512,7 +512,7 @@ class UTXOManager:
         base = WHATSONCHAIN_BASE_URL.rstrip("/")
         url = f"{base}/{net}/address/{address}/unspent"
 
-        async with httpx.AsyncClient() as client:
+        async with pooled_client() as client:
             response = await client.get(url, timeout=timeout_seconds)
             response.raise_for_status()
             payload = response.json()

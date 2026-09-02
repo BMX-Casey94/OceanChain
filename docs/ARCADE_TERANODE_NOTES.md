@@ -120,6 +120,7 @@
 - Treat `ARC_MAX_TIMEOUT_SECONDS=1` as a diagnostic setting, not a production default.
 - Enable Gorilla EF explicitly during validation runs: `GORILLA_TX_FORMAT=ef`.
 - Avoid giant refill fan-outs; larger reserve UTXOs are more important than a huge count of tiny ones.
+- All outbound HTTP (ARC submits/polls, reaper checks, WoC sync) shares one process-wide keep-alive `httpx` client (`backend/http_client.py`). Per-request clients previously caused hundreds of fresh TLS handshakes per second — observed as `ConnectTimeout` floods against Cloudflare-fronted TAAL and 5-10s GorillaPool POST latencies under load. Never construct `httpx.AsyncClient()` in a hot path.
 
 ## Immediate VPS recovery playbook
 
