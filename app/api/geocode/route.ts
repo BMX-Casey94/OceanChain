@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
   try {
     const res = await fetch(url.toString(), {
       headers: {
-        "User-Agent": "Ocechain/1.0 (maritime intelligence; contact enterprise@ocechain.com)",
+        "User-Agent": "Ocechain/1.0 (maritime intelligence; https://watching.boats)",
         Accept: "application/json",
       },
       next: { revalidate: 0 },

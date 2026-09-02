@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { BrandMark } from "@/components/brand-mark"
-import { getEnterpriseMailto } from "@/lib/site"
+import { getEnterpriseContactUrl } from "@/lib/site"
 
 export function Footer() {
   const currentYear = new Date().getFullYear()
@@ -52,7 +52,9 @@ export function Footer() {
           <div>
             <h3 className="text-xs uppercase tracking-[0.2em] text-white/40 mb-4">Enterprise</h3>
             <a
-              href={getEnterpriseMailto()}
+              href={getEnterpriseContactUrl()}
+              target="_blank"
+              rel="noopener noreferrer"
               className="text-sm text-teal-300 hover:text-teal-200 transition-colors"
             >
               Contact enterprise

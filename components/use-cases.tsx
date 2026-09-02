@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { getEnterpriseMailto } from "@/lib/site"
+import { getEnterpriseContactUrl } from "@/lib/site"
 import { ParallaxBackdrop, Reveal } from "@/components/parallax"
 import {
   AnchorShieldIcon,
@@ -77,7 +77,9 @@ export function UseCases() {
               Explore the live map
             </Link>
             <a
-              href={getEnterpriseMailto("Ocechain — insurance & enterprise")}
+              href={getEnterpriseContactUrl()}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn-outline-neon"
             >
               Discuss enterprise access

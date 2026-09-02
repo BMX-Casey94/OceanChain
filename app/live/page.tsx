@@ -6,7 +6,7 @@ import { SITE_NAME } from "@/lib/site"
 export const metadata: Metadata = {
   title: "Live fleet",
   description:
-    "Search ships and locations on the Ocechain live map. Inspect vessel positions and Bitcoin-recorded evidence in real time.",
+    "Boat watching and vessel spotting on the Ocechain live map — search ships and locations, track vessel positions in real time, and open Bitcoin-recorded evidence for every sighting.",
   alternates: { canonical: "/live" },
   openGraph: {
     title: `Live fleet | ${SITE_NAME}`,

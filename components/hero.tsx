@@ -6,7 +6,7 @@ import { motion, useReducedMotion, useScroll, useTransform } from "framer-motion
 import { ArrowRight, ChevronDown } from "lucide-react"
 import { Particles } from "./particles"
 import { ContainerShipIcon } from "./icons/marine"
-import { getEnterpriseMailto } from "@/lib/site"
+import { getEnterpriseContactUrl } from "@/lib/site"
 
 export function Hero() {
   const reduceMotion = useReducedMotion()
@@ -117,7 +117,9 @@ export function Hero() {
             How it works
           </a>
           <a
-            href={getEnterpriseMailto("Ocechain insurance & enterprise enquiry")}
+            href={getEnterpriseContactUrl()}
+            target="_blank"
+            rel="noopener noreferrer"
             className="text-sm text-white/60 hover:text-teal-300 transition-colors"
           >
             Talk to enterprise

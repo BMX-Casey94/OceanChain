@@ -6,18 +6,15 @@ export const SITE_DESCRIPTION =
 export function getSiteUrl(): string {
   const raw = process.env.NEXT_PUBLIC_SITE_URL?.trim()
   if (raw) return raw.replace(/\/$/, "")
-  return "https://ocechain.com"
+  return "https://watching.boats"
 }
 
-export function getEnterpriseEmail(): string {
-  return (
-    process.env.NEXT_PUBLIC_ENTERPRISE_EMAIL?.trim() ||
-    "enterprise@ocechain.com"
-  )
-}
+export const X_HANDLE = "@BSVCasey"
+export const X_PROFILE_URL = "https://x.com/BSVCasey"
 
-export function getEnterpriseMailto(subject = "Ocechain enterprise enquiry"): string {
-  return `mailto:${getEnterpriseEmail()}?subject=${encodeURIComponent(subject)}`
+// No mailbox is operated today; enterprise contact routes to X unless overridden.
+export function getEnterpriseContactUrl(): string {
+  return process.env.NEXT_PUBLIC_CONTACT_URL?.trim() || X_PROFILE_URL
 }
 
 export const WHATS_ON_CHAIN_TX = (txid: string) =>

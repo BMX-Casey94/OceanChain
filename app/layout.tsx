@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next"
 import { DM_Sans, Instrument_Serif, JetBrains_Mono, Syne } from "next/font/google"
 import { Analytics } from "@vercel/analytics/next"
 import { JsonLd } from "@/components/seo/json-ld"
-import { SITE_DESCRIPTION, SITE_NAME, SITE_TAGLINE, getSiteUrl } from "@/lib/site"
+import { SITE_DESCRIPTION, SITE_NAME, SITE_TAGLINE, X_HANDLE, getSiteUrl } from "@/lib/site"
 import "./globals.css"
 
 const dmSans = DM_Sans({
@@ -44,9 +44,18 @@ export const metadata: Metadata = {
   category: "technology",
   keywords: [
     "Ocechain",
+    "watching.boats",
     "maritime intelligence",
     "AIS vessel tracking",
     "AIS ship positions",
+    "boat watching",
+    "vessel spotting",
+    "live ship tracking",
+    "fleet monitoring",
+    "immutable ship records",
+    "permanent vessel position records",
+    "enterprise boat tracking",
+    "shipping intelligence",
     "Bitcoin",
     "ship tracking",
     "marine insurance",
@@ -54,6 +63,7 @@ export const metadata: Metadata = {
     "vessel positions",
     "blockchain maritime data",
     "immutable vessel records",
+    "maritime compliance",
     "P&I",
     "port logistics",
   ],
@@ -83,6 +93,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
+    site: X_HANDLE,
+    creator: X_HANDLE,
     title: `${SITE_NAME} | ${SITE_TAGLINE}`,
     description: SITE_DESCRIPTION,
   },

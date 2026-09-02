@@ -1,11 +1,11 @@
 # Ocechain — full product description
 
-Ocechain (brand name) permanently records global maritime AIS vessel positions on Bitcoin. It turns ephemeral ship movements into an immutable, publicly verifiable evidence layer.
+Ocechain (brand name) permanently records global maritime AIS vessel positions on Bitcoin. It turns ephemeral ship movements into an immutable, publicly verifiable evidence layer — AIS vessel tracking with permanent vessel position records that anyone can check against the public ledger.
 
-Canonical short summary: https://ocechain.com/llms.txt
-Website: https://ocechain.com/
-Live map: https://ocechain.com/live
-FAQ: https://ocechain.com/faq
+Canonical short summary: https://watching.boats/llms.txt
+Website: https://watching.boats/
+Live map: https://watching.boats/live
+FAQ: https://watching.boats/faq
 
 ## Problem
 
@@ -18,15 +18,18 @@ Maritime decisions — insurance claims, underwriting, compliance reviews, cargo
 3. Encode compact position records and broadcast them to Bitcoin.
 4. Present a live map where users can search ships and locations, open vessel panels, and follow links to public explorers for Bitcoin transaction evidence.
 
+The result is shipping intelligence built on immutable ship records: fleet monitoring and marine insurance evidence that does not depend on any single party's database.
+
 ## Primary audiences
 
 - Marine insurance & claims investigators
 - Underwriters and fleet risk teams
 - Shipowners, operators, and P&I clubs
-- Ports, terminals, and logistics teams
-- Trade compliance reviewers (as an evidence layer; not a full sanctions product)
+- Ports, terminals, and port logistics teams
+- Trade compliance reviewers (as an evidence layer for maritime compliance; not a full sanctions product)
 - Maritime counsel and dispute resolution
 - Researchers and journalists
+- Enterprise boat tracking teams that need verifiable position history
 
 ## Product surfaces
 
@@ -55,4 +58,4 @@ Ocechain is not a navigational aid. AIS coverage and latency depend on upstream 
 
 ## Contact
 
-enterprise@ocechain.com
+Enterprise / insurance enquiries: message Casey on X — https://x.com/BSVCasey

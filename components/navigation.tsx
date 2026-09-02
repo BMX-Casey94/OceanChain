@@ -4,7 +4,7 @@ import { useState } from "react"
 import Link from "next/link"
 import { Menu, X } from "lucide-react"
 import { BrandMark } from "@/components/brand-mark"
-import { getEnterpriseMailto } from "@/lib/site"
+import { getEnterpriseContactUrl } from "@/lib/site"
 
 const navLinks = [
   { href: "/live", label: "Live fleet" },
@@ -39,7 +39,9 @@ export function Navigation() {
               Search vessels
             </Link>
             <a
-              href={getEnterpriseMailto()}
+              href={getEnterpriseContactUrl()}
+              target="_blank"
+              rel="noopener noreferrer"
               className="text-sm font-sans text-teal-300/90 hover:text-teal-200 transition-colors"
             >
               Talk to us
@@ -78,7 +80,9 @@ export function Navigation() {
               Search vessels
             </Link>
             <a
-              href={getEnterpriseMailto()}
+              href={getEnterpriseContactUrl()}
+              target="_blank"
+              rel="noopener noreferrer"
               className="block text-sm text-teal-300"
               onClick={() => setIsOpen(false)}
             >

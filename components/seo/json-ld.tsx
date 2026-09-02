@@ -3,14 +3,13 @@ import {
   SITE_DESCRIPTION,
   SITE_NAME,
   SITE_TAGLINE,
-  getEnterpriseEmail,
+  X_PROFILE_URL,
   getSiteUrl,
 } from "@/lib/site"
 
 /** Site-wide Organization / WebSite / SoftwareApplication graph. */
 export function JsonLd() {
   const siteUrl = getSiteUrl()
-  const email = getEnterpriseEmail()
   const logoUrl = `${siteUrl}/apple-icon`
 
   const graph = {
@@ -21,6 +20,7 @@ export function JsonLd() {
         "@id": `${siteUrl}/#organisation`,
         name: SITE_NAME,
         legalName: SITE_NAME,
+        alternateName: "watching.boats",
         url: siteUrl,
         description: SITE_DESCRIPTION,
         slogan: SITE_TAGLINE,
@@ -31,12 +31,12 @@ export function JsonLd() {
           height: 180,
         },
         image: logoUrl,
-        email,
+        sameAs: [X_PROFILE_URL],
         contactPoint: [
           {
             "@type": "ContactPoint",
             contactType: "sales",
-            email,
+            url: X_PROFILE_URL,
             areaServed: "Worldwide",
             availableLanguage: ["en-GB", "en"],
           },
@@ -47,6 +47,10 @@ export function JsonLd() {
           "marine insurance evidence",
           "Bitcoin",
           "ship position records",
+          "boat watching",
+          "vessel spotting",
+          "fleet monitoring",
+          "shipping intelligence",
         ],
       },
       {

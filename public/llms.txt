@@ -6,14 +6,14 @@ Ocechain turns ephemeral ship movements into an immutable evidence layer. It is 
 
 ## Key pages
 
-- [Home](https://ocechain.com/): Product overview — how AIS positions become permanent Bitcoin records
-- [Live fleet map](https://ocechain.com/live): Search ships (name, MMSI, call sign) and locations (ports, places, coordinates); open vessel panels and explorer links
-- [FAQ](https://ocechain.com/faq): Canonical answers on insurance use, on-chain records, data sources, and disclaimers
-- [Full description](https://ocechain.com/llms-full.txt): Longer product, audience, and technical summary for models that need more context
+- [Home](https://watching.boats/): Product overview — how AIS positions become permanent Bitcoin records
+- [Live fleet map](https://watching.boats/live): Search ships (name, MMSI, call sign) and locations (ports, places, coordinates); open vessel panels and explorer links
+- [FAQ](https://watching.boats/faq): Canonical answers on insurance use, on-chain records, data sources, and disclaimers
+- [Full description](https://watching.boats/llms-full.txt): Longer product, audience, and technical summary for models that need more context
 
 ## What Ocechain is
 
-Ocechain ingests real-time global AIS vessel data and records compact position payloads on Bitcoin. The product is an evidence layer for marine insurance, logistics, compliance, operators, counsel, researchers, and journalists.
+Ocechain ingests real-time global AIS vessel data and records compact position payloads on Bitcoin. The result is live ship tracking backed by immutable ship records — an evidence layer for marine insurance, logistics, compliance, operators, counsel, researchers, and journalists. For boat watching and vessel spotting enthusiasts, the same live map offers a permanent, verifiable view of fleet movements.
 
 ## What Ocechain is not
 
@@ -32,9 +32,9 @@ User-facing brand: Ocechain. On-chain OP_RETURN prefix: `Ocechain`. Marketing la
 
 ## Optional
 
-- [Sitemap](https://ocechain.com/sitemap.xml): Indexable HTML routes
-- [Robots](https://ocechain.com/robots.txt): Crawler permissions (search and AI answer bots allowed)
+- [Sitemap](https://watching.boats/sitemap.xml): Indexable HTML routes
+- [Robots](https://watching.boats/robots.txt): Crawler permissions (search and AI answer bots allowed)
 
 ## Contact
 
-Enterprise / insurance enquiries: enterprise@ocechain.com
+Enterprise / insurance enquiries: message Casey on X — https://x.com/BSVCasey
