@@ -58,6 +58,8 @@ from broadcaster import (
     check_tx_status_all,
     arc_status_rank,
     is_final_failure_status,
+    register_mask_updater,
+    cancel_background_posts,
     BroadcastError,
 )
 from http_client import close_client
@@ -790,6 +792,9 @@ async def shutdown(pool: asyncpg.Pool, tasks: list[asyncio.Task]) -> None:
     # Wait for tasks to complete
     await asyncio.gather(*tasks, return_exceptions=True)
     
+    # Cancel in-flight background TAAL POSTs before closing the HTTP client
+    await cancel_background_posts()
+
     # Close database pool
     await pool.close()
     logger.info("Database pool closed")
@@ -829,6 +834,10 @@ async def main() -> None:
     
     # Initialize UTXO manager
     await utxo_manager.initialize(db_pool)
+
+    # Fire-and-forget dual broadcast: background TAAL POSTs flip the TAAL
+    # submit_mask bit on pending rows, tightening the reaper's quorum.
+    register_mask_updater(utxo_manager.mark_taal_accepted)
     
     # Check initial pool depth
     depth = await utxo_manager.pool_depth()

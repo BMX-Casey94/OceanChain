@@ -3,16 +3,18 @@ OceanChain Broadcaster Module
 
 Handles submission of raw transactions to ARC-compatible endpoints with
 GorillaPool Arcade as primary and TAAL as fallback. When ARC_DUAL_BROADCAST is
-enabled and a TAAL key is configured, every tx is also submitted to TAAL
-concurrently: two independent operators injecting the tx is what makes it
-propagate to explorers, and it lets the pending-reaper require quorum (both
-endpoints reporting SEEN_ON_NETWORK+) before unlocking change outputs.
+enabled and a TAAL key is configured, every tx is also POSTed to TAAL as a
+fire-and-forget background task the hot path never awaits: two independent
+operators injecting the tx is what makes it propagate to explorers, and when
+the background POST lands it flips the tx's submit_mask TAAL bit so the
+pending-reaper can require quorum (both endpoints reporting SEEN_ON_NETWORK+)
+before unlocking change outputs.
 """
 
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -88,9 +90,101 @@ async def _record_arc_attempt(broadcaster_name: str, start: float, success: bool
 SUBMIT_MASK_GORILLA = 1
 SUBMIT_MASK_TAAL = 2
 
-# Bound on the secondary (TAAL) POST in dual-broadcast mode, so a slow-but-alive
-# TAAL cannot stretch per-tx latency beyond this even when GorillaPool is fast.
-_DUAL_POST_TIMEOUT_SECONDS = 5.0
+# Fire-and-forget TAAL POSTs (dual broadcast). TAAL's parent-aware validation
+# regularly exceeds 5s for zero-conf chains, so the hot path never awaits it;
+# the background task gets a generous budget and flips the TAAL submit_mask bit
+# via the registered updater when it lands. The in-flight cap bounds task
+# accumulation if TAAL stalls at broadcast rate.
+_TAAL_BG_POST_TIMEOUT_SECONDS = 20.0
+_TAAL_BG_MAX_IN_FLIGHT = 256
+_taal_bg_in_flight = 0
+_background_tasks: set[asyncio.Task] = set()
+_MASK_UPDATER: Optional[Callable[[str], Awaitable[None]]] = None
+
+
+def register_mask_updater(updater: Callable[[str], Awaitable[None]]) -> None:
+    """
+    Register the coroutine called with a txid when a background TAAL POST lands.
+    main.py wires UTXOManager.mark_taal_accepted here at startup.
+    """
+    global _MASK_UPDATER
+    _MASK_UPDATER = updater
+
+
+async def _taal_background_post(
+    client: httpx.AsyncClient, raw_tx_hex: str
+) -> Optional[dict[str, Any]]:
+    """
+    POST to TAAL off the hot path. Returns the ARC result on success, None on
+    any failure. On success the registered mask updater flips the TAAL bit on
+    the tx's pending UTXO rows, tightening the reaper's quorum retroactively.
+    """
+    start = time.monotonic()
+    try:
+        result = await _post_to_arc(
+            client,
+            TAAL_ARC_URL,
+            raw_tx_hex,
+            "taal",
+            api_key=TAAL_API_KEY,
+            timeout=_TAAL_BG_POST_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        await _record_arc_attempt("taal", start, False)
+        _arc_detail("TAAL background POST failed: %s", _safe_exc_text(e))
+        return None
+
+    await _record_arc_attempt("taal", start, True)
+    txid = str(result.get("txid") or "")
+    if txid and _MASK_UPDATER is not None:
+        try:
+            await _MASK_UPDATER(txid)
+        except Exception as e:
+            logger.warning(
+                "TAAL mask update failed for %s: %s", txid[:16], _safe_exc_text(e)
+            )
+    return result
+
+
+def _launch_taal_background_post(
+    client: httpx.AsyncClient, raw_tx_hex: str
+) -> Optional[asyncio.Task]:
+    """
+    Launch the TAAL POST as a tracked background task. Returns None when the
+    in-flight cap is reached (the tx simply stays GorillaPool-only, mask=1).
+    """
+    global _taal_bg_in_flight
+    if _taal_bg_in_flight >= _TAAL_BG_MAX_IN_FLIGHT:
+        _arc_detail(
+            "TAAL background POST skipped: %s already in flight",
+            _TAAL_BG_MAX_IN_FLIGHT,
+        )
+        return None
+    _taal_bg_in_flight += 1
+
+    async def _runner() -> Optional[dict[str, Any]]:
+        return await _taal_background_post(client, raw_tx_hex)
+
+    task = asyncio.create_task(_runner())
+    _background_tasks.add(task)
+
+    def _on_done(done: asyncio.Task) -> None:
+        # Done callbacks fire even when a task is cancelled before its first
+        # step (a finally inside _runner would not), keeping the count exact.
+        global _taal_bg_in_flight
+        _taal_bg_in_flight -= 1
+        _background_tasks.discard(done)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+async def cancel_background_posts() -> None:
+    """Cancel in-flight background TAAL POSTs (process shutdown)."""
+    for task in list(_background_tasks):
+        task.cancel()
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 
 class BroadcastError(Exception):
@@ -701,14 +795,15 @@ async def _submit_dual(
     gorilla_tx_hex: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Dual broadcast: POST to GorillaPool and TAAL concurrently, then poll the
-    primary (GorillaPool) to ARC_WAIT_FOR_STATUS.
-
-    The secondary POST is bounded by _DUAL_POST_TIMEOUT_SECONDS so a slow TAAL
-    cannot stretch per-tx latency; tracking TAAL-side propagation is the
-    reaper's job, not the hot path's. GorillaPool failure falls back to
-    completing on TAAL when TAAL's POST landed, plus one GorillaPool retry for
-    non-terminal POST errors.
+    Dual broadcast: GorillaPool is the synchronous hot path (POST + poll to
+    ARC_WAIT_FOR_STATUS). The TAAL POST runs as a background task the success
+    path never awaits — TAAL's parent-aware validation of zero-conf chains
+    regularly exceeds 5s, and awaiting it taxed every tx with a ~5s floor for
+    little acceptance. When a background POST lands, the registered mask
+    updater flips the TAAL bit on the tx's pending UTXO rows so the reaper's
+    quorum tightens retroactively. On the GorillaPool failure path the
+    in-flight TAAL task is awaited: async in the success path, synchronous
+    exactly when it is the safety net.
     """
     gorilla_error: Optional[str] = None
     taal_error: Optional[str] = None
@@ -731,51 +826,23 @@ async def _submit_dual(
             gorilla_error = _safe_exc_text(fmt_err)
             _arc_detail("Skipping GorillaPool submit: %s", gorilla_error)
 
+        # Launched before the GorillaPool POST so TAAL's slow validation
+        # overlaps the hot path instead of extending it.
+        taal_task = _launch_taal_background_post(client, raw_tx_hex)
+
         post_start = time.monotonic()
         g_res: Any = None
-        t_res: Any
         if gorilla_submit_enabled:
-            g_res, t_res = await asyncio.gather(
-                _post_to_arc(
-                    client, GORILLA_ARC_URL, selected_gorilla_tx_hex, "gorillapool"
-                ),
-                _post_to_arc(
-                    client,
-                    TAAL_ARC_URL,
-                    raw_tx_hex,
-                    "taal",
-                    api_key=TAAL_API_KEY,
-                    timeout=_DUAL_POST_TIMEOUT_SECONDS,
-                ),
-                return_exceptions=True,
-            )
-        else:
             try:
-                t_res = await _post_to_arc(
-                    client,
-                    TAAL_ARC_URL,
-                    raw_tx_hex,
-                    "taal",
-                    api_key=TAAL_API_KEY,
-                    timeout=_DUAL_POST_TIMEOUT_SECONDS,
+                g_res = await _post_to_arc(
+                    client, GORILLA_ARC_URL, selected_gorilla_tx_hex, "gorillapool"
                 )
             except Exception as e:
-                t_res = e
-
-        # TAAL stats: success = POST landed. Getting the tx into TAAL's mempool is
-        # the point of dual broadcast; status tracking is the reaper's job.
-        await _record_arc_attempt("taal", post_start, isinstance(t_res, dict))
-        if not isinstance(t_res, dict):
-            taal_error = (
-                _safe_exc_text(t_res) if isinstance(t_res, Exception) else "unknown"
-            )
-            _arc_detail("TAAL dual-broadcast POST failed: %s", taal_error)
+                g_res = e
 
         submit_mask = 0
         if isinstance(g_res, dict):
             submit_mask |= SUBMIT_MASK_GORILLA
-        if isinstance(t_res, dict):
-            submit_mask |= SUBMIT_MASK_TAAL
 
         if isinstance(g_res, dict):
             try:
@@ -828,9 +895,19 @@ async def _submit_dual(
                         "GorillaPool dual-broadcast retry failed: %s", gorilla_error
                     )
 
-        # GorillaPool could not complete; ride TAAL to the target status if its
-        # POST landed (the tx is live there regardless of GorillaPool's state).
+        # GorillaPool could not complete; TAAL is the safety net. The background
+        # POST was launched at submit start, so this await usually returns at
+        # once. Ride TAAL to the target status if its POST landed.
+        t_res: Any = None
+        if taal_task is not None:
+            try:
+                t_res = await taal_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                t_res = None
         if isinstance(t_res, dict):
+            submit_mask |= SUBMIT_MASK_TAAL
             try:
                 if _target_status_reached(t_res["status"]):
                     result = dict(t_res)
@@ -850,6 +927,10 @@ async def _submit_dual(
                 _arc_detail(
                     "TAAL completion after GorillaPool failure failed: %s", taal_error
                 )
+        elif taal_task is None:
+            taal_error = "background POST skipped (in-flight cap reached)"
+        else:
+            taal_error = "background POST failed (see earlier TAAL log lines)"
 
     raise BroadcastError(
         "All broadcast attempts failed",

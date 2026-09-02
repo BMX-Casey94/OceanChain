@@ -8,10 +8,12 @@ Handles acquisition, release, consumption, and automatic fan-out refills.
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Optional, Tuple
 
 import asyncpg
 
+from broadcaster import SUBMIT_MASK_TAAL
 from http_client import pooled_client
 from config import (
     UTXO_POOL_TARGET,
@@ -32,6 +34,21 @@ UTXO_ROLE_POOL = "pool"
 UTXO_ROLE_RESERVE = "reserve"
 
 logger = logging.getLogger(__name__)
+
+# Fire-and-forget dual broadcast: a background TAAL POST can land before or
+# after the tx's UTXO rows are inserted. mark_taal_accepted UPDATEs existing
+# rows; this set covers the accept-before-insert race so insert paths can OR
+# the TAAL bit in themselves. Bounded — promotion happens within minutes, so
+# only recent txids matter.
+_TAAL_ACCEPTED_TXIDS: OrderedDict[str, None] = OrderedDict()
+_TAAL_ACCEPTED_MAX = 100_000
+
+
+def _remember_taal_acceptance(txid: str) -> None:
+    _TAAL_ACCEPTED_TXIDS[txid] = None
+    _TAAL_ACCEPTED_TXIDS.move_to_end(txid)
+    while len(_TAAL_ACCEPTED_TXIDS) > _TAAL_ACCEPTED_MAX:
+        _TAAL_ACCEPTED_TXIDS.popitem(last=False)
 
 
 class UTXOManager:
@@ -295,6 +312,11 @@ class UTXOManager:
                 )
                 return
 
+        if not (submit_mask & SUBMIT_MASK_TAAL) and txid in _TAAL_ACCEPTED_TXIDS:
+            # TAAL's background POST landed before this insert (fast TAAL, slow
+            # GorillaPool poll); the UPDATE in mark_taal_accepted found no rows.
+            submit_mask |= SUBMIT_MASK_TAAL
+
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -356,6 +378,28 @@ class UTXOManager:
             }
             for r in rows
         ]
+
+    async def mark_taal_accepted(self, txid: str) -> None:
+        """
+        Record that TAAL accepted a tx via a background (fire-and-forget) POST.
+
+        Flips the TAAL bit on the tx's pending rows so the reaper's promote
+        quorum tightens retroactively, and remembers the txid so rows inserted
+        after acceptance (fast TAAL, slow GorillaPool poll) still get the bit.
+        Idempotent; safe to call concurrently for the same txid.
+        """
+        _remember_taal_acceptance(txid)
+        if not self._pool:
+            return
+        await self._pool.execute(
+            """
+            UPDATE utxos
+            SET submit_mask = (submit_mask | $2)::smallint
+            WHERE txid = $1 AND pending = TRUE
+            """,
+            txid,
+            SUBMIT_MASK_TAAL,
+        )
 
     async def promote_pending_txid(self, txid: str) -> int:
         """
@@ -882,6 +926,9 @@ class UTXOManager:
                     txid_canon,
                 )
             submit_mask = int(broadcast.get("submit_mask") or 1)
+            if not (submit_mask & SUBMIT_MASK_TAAL) and txid in _TAAL_ACCEPTED_TXIDS:
+                # Same accept-before-insert race as add_utxo.
+                submit_mask |= SUBMIT_MASK_TAAL
             logger.info(
                 "Fan-out broadcast via %s (status=%s, submit_mask=%s)",
                 broadcast.get("broadcaster"),
