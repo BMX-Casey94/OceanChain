@@ -408,7 +408,7 @@ async def broadcasting_loop() -> None:
                 vessel_count,
                 due_count,
                 len(batch),
-                pool_ready,
+                pool_metrics["spendable_depth"],
             )
 
             semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
