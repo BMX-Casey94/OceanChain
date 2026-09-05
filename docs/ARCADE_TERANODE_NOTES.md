@@ -111,6 +111,14 @@
   - roughly `37,199 sat` fee,
   - approximately `363 KB` transaction size.
 - That is operationally poor even before network propagation issues are considered.
+- Once no `<= FANOUT_MAX_INPUTS` set of reserve rows covers `UTXO_POOL_TARGET x UTXO_VALUE_EACH`,
+  fan-out refuses outright and the pool drains to a stall. The on-chain balance is fine — it is
+  simply too fragmented to spend efficiently. The fix is a consolidation sweep:
+  `POST /utxo/consolidate` (admin key) folds up to `CONSOLIDATION_MAX_INPUTS` reserve rows
+  (largest first) into one single-output self-spend per tx, recorded as pending reserve until
+  the reaper confirms propagation. Inputs below the per-input fee breakeven (~16 sat at
+  102.5 sat/KB) are skipped by default so sweeping never burns more fee than an input is worth.
+  Always run `"dry_run": true` first to inspect the plan and fee economics.
 
 ## Practical operating guidance
 
@@ -147,15 +155,46 @@ set -a && source .env && set +a
 python scripts/import_reserves_bitails.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --min-sat 1000
 ```
 
-### 4. Trigger one refill and verify
+### 4. Consolidate fragmented reserves (when fan-out refuses)
+
+Symptom: `POST /utxo/refill` answers "Cannot fund fan-out …" or "Refusing fan-out requiring
+N inputs …" while the wallet still holds a balance — the reserve is too fragmented for
+`FANOUT_MAX_INPUTS`.
+
+```bash
+cd /opt/oceanchain/backend
+set -a && source .env && set +a
+
+# 1) Dry run first — inspect chunks, fees and the dust floor before spending anything
+curl -sS -X POST http://127.0.0.1:8000/utxo/consolidate \
+  -H "X-OceanChain-Admin-Key: $OCEANCHAIN_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}' | python -m json.tool
+
+# 2) Sweep — each call broadcasts up to max_txs consolidation txs; repeat while
+#    remaining_candidate_inputs > 0
+curl -sS -X POST http://127.0.0.1:8000/utxo/consolidate \
+  -H "X-OceanChain-Admin-Key: $OCEANCHAIN_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"max_txs": 10}' | python -m json.tool
+```
+
+- Consolidation outputs enter as **pending reserve**; the reaper promotes them once the
+  promotion quorum reports `SEEN_ON_NETWORK` (usually a minute or two). Watch for
+  `Consolidation broadcast` and reaper promote lines in `journalctl -u oceanchain -f`.
+- Inputs below the per-input fee breakeven (~16 sat at 102.5 sat/KB) are skipped by default;
+  they cost more to sweep than they are worth. Override only deliberately with
+  `"min_input_sat": 1`.
+
+### 5. Trigger one refill and verify
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/utxo/refill
 curl -sS http://127.0.0.1:8000/health | python -m json.tool
-journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-out|ARC response via|ARC status via|GorillaPool attempt|TAAL fallback|Summary'
+journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-out|Consolidation|ARC response via|ARC status via|GorillaPool attempt|TAAL fallback|Summary'
 ```
 
-### 5. If refill still fails
+### 6. If refill still fails
 
 - Import one or more larger reserve outputs manually with `POST /utxo/reserve`, or fund the wallet with a fresh larger UTXO.
 - Raise `UTXO_VALUE_EACH` back to a safer production value before rebuilding the pool.

@@ -601,6 +601,91 @@ async def trigger_refill() -> JSONResponse:
         )
 
 
+class ConsolidateBody(BaseModel):
+    """POST body for /utxo/consolidate (every field optional)."""
+
+    max_inputs_per_tx: int = Field(
+        default=0,
+        ge=0,
+        le=10000,
+        description="Inputs per consolidation tx; 0 = server default (CONSOLIDATION_MAX_INPUTS).",
+    )
+    max_txs: int = Field(
+        default=5,
+        ge=1,
+        le=25,
+        description="Maximum consolidation transactions to broadcast in this call.",
+    )
+    min_input_sat: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Skip inputs below this value. Default: per-input fee breakeven + 1 sat "
+        "at the configured fee rate (never burn more fee than an input is worth).",
+    )
+    max_input_sat: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Skip inputs above this value (e.g. to leave fan-out-sized reserves untouched).",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Plan only: report chunks, fees and totals without locking or broadcasting.",
+    )
+
+
+@app.post("/utxo/consolidate")
+async def consolidate_reserves(
+    body: ConsolidateBody,
+    x_oceanchain_admin_key: Optional[str] = Header(
+        default=None,
+        alias="X-OceanChain-Admin-Key",
+    ),
+) -> JSONResponse:
+    """
+    Sweep fragmented `reserve` UTXOs into large single-output self-spends so
+    fan-out can fund the pool again (FANOUT_MAX_INPUTS caps how many small
+    rows one fan-out may consume).
+
+    Each consolidation tx spends up to `max_inputs_per_tx` reserve rows
+    (largest first) into one output back to the wallet, recorded as pending
+    reserve until the reaper confirms network propagation. Selected rows are
+    locked atomically and the refill mutex is held, so a concurrent fan-out
+    cannot double-spend them; failed chunks are unlocked, never dropped.
+
+    Run with `dry_run=true` first to inspect the plan and fee economics.
+    Same auth as `/utxo/sync-reserves-woc` (`OCEANCHAIN_ADMIN_API_KEY`).
+    """
+    if not OCEANCHAIN_ADMIN_API_KEY:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Set OCEANCHAIN_ADMIN_API_KEY in .env to enable this endpoint",
+            },
+            status_code=503,
+        )
+    if not _admin_key_authorised(x_oceanchain_admin_key):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    try:
+        result = await utxo_manager.consolidate_reserve(
+            max_inputs_per_tx=body.max_inputs_per_tx or None,
+            max_txs=body.max_txs,
+            min_input_sat=body.min_input_sat,
+            max_input_sat=body.max_input_sat,
+            dry_run=body.dry_run,
+        )
+        status_code = 200 if result.get("status") == "ok" else 500
+        return JSONResponse(result, status_code=status_code)
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error("consolidate_reserves failed: %s", e, exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
+
+
 # WebSocket Endpoint
 
 @app.websocket("/ws")

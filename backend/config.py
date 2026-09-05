@@ -112,6 +112,12 @@ FANOUT_MAX_INPUTS: int = int(os.getenv("FANOUT_MAX_INPUTS", "512"))
 # When > 0, WhatsOnChain sync and admin bulk reserve import skip UTXOs below this value (reduces dust rows).
 RESERVE_MIN_IMPORT_SAT: int = int(os.getenv("RESERVE_MIN_IMPORT_SAT", "0"))
 
+# Consolidation (sweeping fragmented reserve UTXOs back into large fan-out funding outputs).
+# Inputs per consolidation tx: each P2PKH input is ~148 bytes, so 400 inputs ≈ 60 KB — well
+# inside ARC policy limits while keeping signature validation fast. One tx per chunk, one
+# large output per tx back to the wallet, recorded as pending reserve until it propagates.
+CONSOLIDATION_MAX_INPUTS: int = int(os.getenv("CONSOLIDATION_MAX_INPUTS", "400"))
+
 # Database pool sizing — controls how many Postgres backend processes run concurrently.
 # At high BROADCAST_CONCURRENCY every pool slot runs constant UPDATE/DELETE/INSERT cycles;
 # 20 slots on a 4-core VPS can saturate CPU.  3-5 is typically plenty for UTXO operations.
@@ -294,6 +300,9 @@ def validate_config() -> list[str]:
     if RESERVE_MIN_IMPORT_SAT < 0:
         errors.append("RESERVE_MIN_IMPORT_SAT must be >= 0")
 
+    if CONSOLIDATION_MAX_INPUTS < 2:
+        errors.append("CONSOLIDATION_MAX_INPUTS must be >= 2")
+
     if DB_POOL_MIN_SIZE < 1:
         errors.append("DB_POOL_MIN_SIZE must be >= 1")
     if DB_POOL_MAX_SIZE < DB_POOL_MIN_SIZE:
@@ -433,5 +442,6 @@ def get_config_summary() -> dict:
         "uvicorn_access_log": UVICORN_ACCESS_LOG,
         "admin_api_key_configured": bool(OCEANCHAIN_ADMIN_API_KEY),
         "reserve_min_import_sat": RESERVE_MIN_IMPORT_SAT,
+        "consolidation_max_inputs": CONSOLIDATION_MAX_INPUTS,
         "log_sample_raw_tx_configured": bool(LOG_SAMPLE_RAW_TX_PATH),
     }

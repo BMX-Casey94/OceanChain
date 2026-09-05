@@ -25,6 +25,7 @@ from config import (
     MIN_CHANGE_OUTPUT_SAT,
     REFILL_FAILURE_COOLDOWN_SECONDS,
     RESERVE_MIN_IMPORT_SAT,
+    CONSOLIDATION_MAX_INPUTS,
     WHATSONCHAIN_BASE_URL,
 )
 
@@ -49,6 +50,99 @@ def _remember_taal_acceptance(txid: str) -> None:
     _TAAL_ACCEPTED_TXIDS.move_to_end(txid)
     while len(_TAAL_ACCEPTED_TXIDS) > _TAAL_ACCEPTED_MAX:
         _TAAL_ACCEPTED_TXIDS.popitem(last=False)
+
+
+# Fee-estimation size for one signed P2PKH input. Worst case is 149 bytes
+# (73-byte DER signature); 150 keeps the fee sufficient for every signature
+# length at the configured rate, so a consolidation tx can never underpay.
+_CONSOLIDATION_INPUT_VBYTES = 150
+
+# Sentinel for "no upper value bound" in reserve candidate queries (signed int8 max).
+_BIGINT_MAX = 9223372036854775807
+
+
+def _sign_p2pkh_inputs(tx, funding_utxos, private_key, public_key) -> None:
+    """
+    Sign every input of a single-address P2PKH spend (SigHash ALL | FORKID).
+
+    Shared by fan-out refills and reserve consolidation; all inputs must
+    belong to ``public_key``'s address.
+    """
+    from bitcoinx import Script, SigHash, pack_byte
+
+    prev_output_script = public_key.P2PKH_script()
+    pub_key_bytes = public_key.to_bytes()
+    for idx, utxo in enumerate(funding_utxos):
+        sighash_type = SigHash(0x41)  # ALL | FORKID (BSV)
+        sig_hash = tx.signature_hash(
+            input_index=idx,
+            value=utxo["value_sat"],
+            script_code=prev_output_script,
+            sighash=sighash_type,
+        )
+        signature = private_key.sign(sig_hash, hasher=None)
+        signature_bytes = signature + pack_byte(0x41)
+        script_sig = (
+            pack_byte(len(signature_bytes)) + signature_bytes +
+            pack_byte(len(pub_key_bytes)) + pub_key_bytes
+        )
+        tx.inputs[idx].script_sig = Script(script_sig)
+
+
+def _build_consolidation_tx(
+    funding_utxos: list[dict[str, Any]],
+    destination_address: str,
+    private_key,
+) -> Tuple[str, str, int, int]:
+    """
+    Build and sign a consolidation transaction: many P2PKH inputs from this
+    wallet folded into a single P2PKH output back to ``destination_address``.
+
+    Pure and offline — no DB, no network — so it is directly unit-testable.
+
+    Returns:
+        (raw_tx_hex, canonical_txid, fee_sat, output_value_sat)
+
+    Raises:
+        ValueError: fewer than 2 inputs, or inputs cannot cover the fee and
+            still leave a trackable output.
+    """
+    from tx_builder import calculate_fee
+    from bitcoinx import TxInput, TxOutput, Tx, Script, P2PKH_Address, Bitcoin
+
+    if len(funding_utxos) < 2:
+        raise ValueError("Consolidation needs at least 2 inputs to be worthwhile")
+
+    public_key = private_key.public_key
+    p2pkh_script = P2PKH_Address.from_string(destination_address, Bitcoin).to_script()
+
+    sum_in = sum(int(u["value_sat"]) for u in funding_utxos)
+    est_bytes = 10 + len(funding_utxos) * _CONSOLIDATION_INPUT_VBYTES + 34
+    fee_sat = calculate_fee(est_bytes)
+    output_value = sum_in - fee_sat
+    if output_value < MIN_CHANGE_OUTPUT_SAT:
+        raise ValueError(
+            f"Consolidation inputs cannot cover fee: {sum_in} sat in, "
+            f"~{fee_sat} sat fee would leave no trackable output"
+        )
+
+    tx_inputs = [
+        TxInput(bytes.fromhex(u["txid"])[::-1], int(u["vout"]), Script(), 0xFFFFFFFF)
+        for u in funding_utxos
+    ]
+    tx = Tx(
+        version=1,
+        inputs=tx_inputs,
+        outputs=[TxOutput(output_value, p2pkh_script)],
+        locktime=0,
+    )
+    _sign_p2pkh_inputs(tx, funding_utxos, private_key, public_key)
+
+    raw_tx_hex = tx.to_bytes().hex()
+    txid = tx.hex_hash()
+    if txid:
+        txid = txid.lower()
+    return raw_tx_hex, txid, fee_sat, output_value
 
 
 class UTXOManager:
@@ -146,6 +240,31 @@ class UTXOManager:
             await self.sweep_stale_locks(older_than_seconds=120)
         except Exception as e:
             logger.warning("Could not sweep stale UTXO locks on startup: %s", e)
+
+        # Reserve rows are only ever locked mid-consolidation (seconds, then the
+        # rows are deleted). A lock surviving a restart means a crashed sweep —
+        # release it so the funds can feed fan-out again. Startup-only: the
+        # periodic sweep stays pool-only so it can never race a live sweep.
+        try:
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE utxos SET locked = FALSE, locked_at = NULL
+                    WHERE utxo_role = 'reserve' AND locked = TRUE
+                      AND (
+                        locked_at IS NULL
+                        OR locked_at < NOW() - INTERVAL '120 seconds'
+                      )
+                    """
+                )
+            n_unlocked = int(str(result).split()[-1])
+            if n_unlocked:
+                logger.warning(
+                    "Unlocked %s reserve UTXO(s) left locked by a crashed consolidation",
+                    n_unlocked,
+                )
+        except Exception as e:
+            logger.warning("Could not sweep stale reserve locks on startup: %s", e)
 
     async def acquire_utxo(self) -> Optional[dict[str, Any]]:
         """
@@ -566,6 +685,7 @@ class UTXOManager:
 
         parsed: list[tuple[str, int, int]] = []
         skipped_small = 0
+        skipped_unconfirmed = 0
         min_sat = RESERVE_MIN_IMPORT_SAT
         for item in payload:
             if not isinstance(item, dict):
@@ -577,6 +697,18 @@ class UTXOManager:
             val = item.get("value")
             if txid is None or pos is None or val is None:
                 continue
+            # Unconfirmed outputs (height 0) are zero-conf change; importing them
+            # as spendable reserve would restart the orphan chains the pending
+            # gate exists to prevent. Their creating txs' own pending rows track
+            # them until they propagate.
+            height = item.get("height")
+            if height is not None:
+                try:
+                    if int(height) <= 0:
+                        skipped_unconfirmed += 1
+                        continue
+                except (TypeError, ValueError):
+                    pass  # Unexpected shape — keep importing rather than dropping funds.
             try:
                 v_int = int(val)
             except (TypeError, ValueError):
@@ -606,6 +738,7 @@ class UTXOManager:
             "woc_url": url,
             "fetched_unspent": len(payload),
             "skipped_below_reserve_min": skipped_small + skipped_bulk_min,
+            "skipped_unconfirmed": skipped_unconfirmed,
             "reserve_min_import_sat": min_sat,
             "parsed_valid": len(parsed),
             "upserted_rows": n_reg,
@@ -776,8 +909,6 @@ class UTXOManager:
             Script,
             P2PKH_Address,
             Bitcoin,
-            SigHash,
-            pack_byte,
         )
 
         async with self._refill_lock:
@@ -852,22 +983,7 @@ class UTXOManager:
             tx = Tx(version=1, inputs=tx_inputs, outputs=outputs, locktime=0)
 
             prev_output_script = public_key.P2PKH_script()
-            pub_key_bytes = public_key.to_bytes()
-            for idx, utxo in enumerate(funding_utxos):
-                sighash_type = SigHash(0x41)  # ALL | FORKID (BSV)
-                sig_hash = tx.signature_hash(
-                    input_index=idx,
-                    value=utxo["value_sat"],
-                    script_code=prev_output_script,
-                    sighash=sighash_type,
-                )
-                signature = private_key.sign(sig_hash, hasher=None)
-                signature_bytes = signature + pack_byte(0x41)
-                script_sig = (
-                    pack_byte(len(signature_bytes)) + signature_bytes +
-                    pack_byte(len(pub_key_bytes)) + pub_key_bytes
-                )
-                tx.inputs[idx].script_sig = Script(script_sig)
+            _sign_p2pkh_inputs(tx, funding_utxos, private_key, public_key)
 
             raw_tx_hex = tx.to_bytes().hex()
             gorilla_tx_hex: Optional[str] = None
@@ -984,6 +1100,327 @@ class UTXOManager:
             self._last_refill_error = None
             self._refill_cooldown_until = 0.0
             return txid
+
+    async def _unlock_reserve_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Fail-safe: hand locked reserve rows back after an aborted consolidation chunk."""
+        if not rows:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                UPDATE utxos SET locked = FALSE, locked_at = NULL
+                WHERE txid = $1 AND vout = $2 AND utxo_role = 'reserve'
+                """,
+                [(u["txid"], u["vout"]) for u in rows],
+            )
+
+    async def consolidate_reserve(
+        self,
+        *,
+        max_inputs_per_tx: Optional[int] = None,
+        max_txs: int = 5,
+        min_input_sat: Optional[int] = None,
+        max_input_sat: Optional[int] = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Fold fragmented `reserve` UTXOs into large single-output self-spends so
+        fan-out can fund again once no <= FANOUT_MAX_INPUTS set of small rows
+        covers UTXO_POOL_TARGET x UTXO_VALUE_EACH.
+
+        Each consolidation tx spends up to ``max_inputs_per_tx`` reserve rows
+        (largest first) into one P2PKH output back to the wallet. The output is
+        recorded as **pending** reserve and promoted by the reaper only after
+        the tx propagates — the same zero-conf discipline as fan-out change.
+
+        Safety properties:
+          * Selection locks rows atomically (FOR UPDATE SKIP LOCKED, same
+            pattern as acquire_utxo) and the refill mutex is held for the whole
+            run, so a concurrent fan-out cannot double-spend selected inputs.
+          * Inputs of a chunk that fails to build/broadcast are unlocked,
+            never silently dropped; already-broadcast chunks stay valid.
+          * ``min_input_sat`` defaults to the per-input fee breakeven + 1 sat
+            at the configured fee rate, so sweeping never burns more fee than
+            an input is worth unless the operator opts in (e.g. min_input_sat=1).
+          * ``dry_run`` reports the full plan without locking or broadcasting.
+        """
+        from tx_builder import calculate_fee, get_change_address, to_extended_format_hex
+        from broadcaster import submit, BroadcastError
+        from bitcoinx import PrivateKey
+
+        if not self._pool:
+            raise RuntimeError("UTXO manager not initialized")
+
+        per_tx_cap = int(max_inputs_per_tx) if max_inputs_per_tx else CONSOLIDATION_MAX_INPUTS
+        per_tx_cap = max(2, min(per_tx_cap, CONSOLIDATION_MAX_INPUTS))
+        tx_cap = max(1, min(int(max_txs), 25))
+        per_input_fee = calculate_fee(_CONSOLIDATION_INPUT_VBYTES)
+        floor_sat = int(min_input_sat) if min_input_sat is not None else per_input_fee + 1
+        floor_sat = max(1, floor_sat)
+        ceil_sat = int(max_input_sat) if max_input_sat is not None else None
+        if ceil_sat is not None and ceil_sat < floor_sat:
+            raise ValueError("max_input_sat must be >= min_input_sat")
+        value_upper = ceil_sat if ceil_sat is not None else _BIGINT_MAX
+
+        dust_sql = """
+            SELECT COUNT(*) AS n, COALESCE(SUM(value_sat), 0) AS total
+            FROM utxos
+            WHERE utxo_role = 'reserve' AND locked = FALSE AND pending = FALSE
+              AND value_sat < $1
+        """
+
+        if dry_run:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT txid, vout, value_sat
+                    FROM utxos
+                    WHERE utxo_role = 'reserve' AND locked = FALSE AND pending = FALSE
+                      AND value_sat >= $1 AND value_sat <= $2
+                    ORDER BY value_sat DESC
+                    """,
+                    floor_sat,
+                    value_upper,
+                )
+                dust = await conn.fetchrow(dust_sql, floor_sat)
+            planned: list[dict[str, Any]] = []
+            for i in range(0, len(rows), per_tx_cap):
+                chunk = rows[i : i + per_tx_cap]
+                if len(chunk) < 2:
+                    break  # a lone trailing UTXO is already a single output
+                sum_in = sum(int(r["value_sat"]) for r in chunk)
+                fee = calculate_fee(10 + len(chunk) * _CONSOLIDATION_INPUT_VBYTES + 34)
+                planned.append(
+                    {
+                        "inputs": len(chunk),
+                        "input_sat": sum_in,
+                        "fee_sat": fee,
+                        "output_sat": sum_in - fee,
+                    }
+                )
+            return {
+                "status": "ok",
+                "dry_run": True,
+                "min_input_sat": floor_sat,
+                "max_input_sat": ceil_sat,
+                "per_input_fee_sat": per_input_fee,
+                "max_inputs_per_tx": per_tx_cap,
+                "candidate_inputs": len(rows),
+                "txs_planned": len(planned),
+                "txs": planned,
+                "total_input_sat": sum(p["input_sat"] for p in planned),
+                "total_fees_sat": sum(p["fee_sat"] for p in planned),
+                "total_output_sat": sum(p["output_sat"] for p in planned),
+                "skipped_below_min": {
+                    "count": int(dust["n"] or 0),
+                    "sat": int(dust["total"] or 0),
+                },
+            }
+
+        txs_done: list[dict[str, Any]] = []
+        error: Optional[str] = None
+
+        # The refill mutex serialises against fan_out_refill, which selects the
+        # same reserve rows without locking them first.
+        async with self._refill_lock:
+            private_key = PrivateKey.from_WIF(BSV_PRIVATE_KEY_WIF)
+            public_key = private_key.public_key
+            address = get_change_address()
+
+            for _ in range(tx_cap):
+                async with self._pool.acquire() as conn:
+                    locked_rows = await conn.fetch(
+                        """
+                        UPDATE utxos SET locked = TRUE, locked_at = NOW()
+                        WHERE (txid, vout) IN (
+                            SELECT txid, vout FROM utxos
+                            WHERE utxo_role = 'reserve' AND locked = FALSE AND pending = FALSE
+                              AND value_sat >= $1 AND value_sat <= $2
+                            ORDER BY value_sat DESC
+                            LIMIT $3
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING txid, vout, value_sat
+                        """,
+                        floor_sat,
+                        value_upper,
+                        per_tx_cap,
+                    )
+                chunk = [
+                    {
+                        "txid": str(r["txid"]),
+                        "vout": int(r["vout"]),
+                        "value_sat": int(r["value_sat"]),
+                    }
+                    for r in locked_rows
+                ]
+                if len(chunk) < 2:
+                    # Nothing worthwhile left to sweep; a lone UTXO is already consolidated.
+                    await self._unlock_reserve_rows(chunk)
+                    break
+
+                try:
+                    raw_tx_hex, txid, fee_sat, output_value = _build_consolidation_tx(
+                        chunk, address, private_key
+                    )
+                except ValueError as e:
+                    await self._unlock_reserve_rows(chunk)
+                    error = str(e)
+                    break
+
+                gorilla_tx_hex: Optional[str] = None
+                if GORILLA_TX_FORMAT != "raw":
+                    prev_locking_script_hex = public_key.P2PKH_script().to_bytes().hex()
+                    prevouts = [
+                        {
+                            "value_sat": int(u["value_sat"]),
+                            "locking_script_hex": prev_locking_script_hex,
+                        }
+                        for u in chunk
+                    ]
+                    try:
+                        gorilla_tx_hex = to_extended_format_hex(raw_tx_hex, prevouts)
+                    except Exception as ef_err:
+                        if GORILLA_TX_FORMAT == "ef":
+                            await self._unlock_reserve_rows(chunk)
+                            error = (
+                                "Could not build EF payload for Gorilla consolidation "
+                                f"submit: {ef_err}"
+                            )
+                            logger.error(error)
+                            break
+                        logger.warning(
+                            "Could not build EF payload for Gorilla consolidation (%s); "
+                            "continuing with raw",
+                            ef_err,
+                        )
+
+                try:
+                    broadcast = await submit(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
+                except BroadcastError as e:
+                    error = (
+                        f"Consolidation broadcast failed (all ARC endpoints): {e} | "
+                        f"gorilla={e.gorilla_error or '<none>'} | taal={e.taal_error or '<none>'}"
+                    )
+                    logger.error(error)
+                    await self._unlock_reserve_rows(chunk)
+                    break
+                except Exception as e:
+                    error = f"Consolidation broadcast failed: {type(e).__name__}: {e}"
+                    logger.error(error, exc_info=True)
+                    await self._unlock_reserve_rows(chunk)
+                    break
+
+                txid_arc = broadcast.get("txid")
+                if not txid:
+                    txid = str(txid_arc).lower() if txid_arc else None
+                if not txid:
+                    error = f"Consolidation broadcast returned no txid: {broadcast}"
+                    logger.error(error)
+                    await self._unlock_reserve_rows(chunk)
+                    break
+                if txid_arc and str(txid_arc).lower() != txid:
+                    logger.debug(
+                        "ARC txid %s != local hex_hash %s; using canonical for DB",
+                        txid_arc,
+                        txid,
+                    )
+
+                submit_mask = int(broadcast.get("submit_mask") or 1)
+                if not (submit_mask & SUBMIT_MASK_TAAL) and txid in _TAAL_ACCEPTED_TXIDS:
+                    # Same accept-before-insert race as add_utxo / fan_out_refill.
+                    submit_mask |= SUBMIT_MASK_TAAL
+
+                sum_in = sum(u["value_sat"] for u in chunk)
+                async with self._pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.executemany(
+                            """
+                            DELETE FROM utxos
+                            WHERE txid = $1 AND vout = $2 AND utxo_role = 'reserve'
+                            """,
+                            [(u["txid"], u["vout"]) for u in chunk],
+                        )
+                        # Output enters as pending: the consolidation tx is still
+                        # zero-conf. The reaper promotes it once the tx propagates
+                        # (quorum over submit_mask), or quarantines it if it dies —
+                        # a reserve re-sync re-imports the still-unspent inputs then.
+                        await conn.execute(
+                            """
+                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
+                            VALUES ($1, 0, $2, 'reserve', FALSE, TRUE, $3)
+                            """,
+                            txid,
+                            output_value,
+                            submit_mask,
+                        )
+
+                logger.info(
+                    "Consolidation broadcast via %s (status=%s, submit_mask=%s): "
+                    "%s inputs, %s sat in, fee %s sat, output %s sat -> %s",
+                    broadcast.get("broadcaster"),
+                    broadcast.get("status"),
+                    submit_mask,
+                    len(chunk),
+                    sum_in,
+                    fee_sat,
+                    output_value,
+                    txid,
+                )
+                txs_done.append(
+                    {
+                        "txid": txid,
+                        "inputs": len(chunk),
+                        "input_sat": sum_in,
+                        "fee_sat": fee_sat,
+                        "output_sat": output_value,
+                    }
+                )
+
+        async with self._pool.acquire() as conn:
+            tail = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE value_sat >= $1 AND value_sat <= $2) AS candidates,
+                    COUNT(*) FILTER (WHERE value_sat < $1) AS dust_count,
+                    COALESCE(SUM(value_sat) FILTER (WHERE value_sat < $1), 0) AS dust_sat
+                FROM utxos
+                WHERE utxo_role = 'reserve' AND locked = FALSE AND pending = FALSE
+                """,
+                floor_sat,
+                value_upper,
+            )
+        metrics = await self.reserve_funding_metrics()
+
+        message = None
+        if not txs_done and error is None:
+            message = (
+                "Nothing to consolidate: fewer than 2 unlocked, non-pending reserve "
+                f"UTXOs match the filters (min_input_sat={floor_sat})."
+            )
+        return {
+            "status": "error" if (error and not txs_done) else "ok",
+            "dry_run": False,
+            "message": message,
+            "min_input_sat": floor_sat,
+            "max_input_sat": ceil_sat,
+            "per_input_fee_sat": per_input_fee,
+            "max_inputs_per_tx": per_tx_cap,
+            "txs_broadcast": len(txs_done),
+            "txs": txs_done,
+            "total_inputs_spent": sum(t["inputs"] for t in txs_done),
+            "total_fees_sat": sum(t["fee_sat"] for t in txs_done),
+            "total_output_sat": sum(t["output_sat"] for t in txs_done),
+            "outputs_pending_promotion": len(txs_done),
+            "remaining_candidate_inputs": int(tail["candidates"] or 0),
+            "skipped_below_min": {
+                "count": int(tail["dust_count"] or 0),
+                "sat": int(tail["dust_sat"] or 0),
+            },
+            "error": error,
+            "reserve_count": metrics["reserve_count"],
+            "reserve_total_sat": metrics["reserve_total_sat"],
+        }
 
     async def monitor_loop(self) -> None:
         """
