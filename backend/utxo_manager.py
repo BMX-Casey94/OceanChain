@@ -1114,6 +1114,40 @@ class UTXOManager:
                 [(u["txid"], u["vout"]) for u in rows],
             )
 
+    async def _record_pending_consolidation_output(
+        self,
+        chunk: list[dict[str, Any]],
+        txid: str,
+        output_value: int,
+        submit_mask: int,
+    ) -> None:
+        """
+        Replace a consolidation chunk's input rows with the tx's single output,
+        entered as pending. Used on broadcast success and on posted-but-parked
+        (PENDING_RETRY) failures alike: either way the inputs are spent by an
+        in-flight tx and must never be re-selected. The reaper promotes the
+        output once the tx propagates (quorum over submit_mask), or quarantines
+        it if the tx dies — a reserve re-sync re-imports still-unspent inputs.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(
+                    """
+                    DELETE FROM utxos
+                    WHERE txid = $1 AND vout = $2 AND utxo_role = 'reserve'
+                    """,
+                    [(u["txid"], u["vout"]) for u in chunk],
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
+                    VALUES ($1, 0, $2, 'reserve', FALSE, TRUE, $3)
+                    """,
+                    txid,
+                    output_value,
+                    submit_mask,
+                )
+
     async def consolidate_reserve(
         self,
         *,
@@ -1300,10 +1334,48 @@ class UTXOManager:
                 except BroadcastError as e:
                     error = (
                         f"Consolidation broadcast failed (all ARC endpoints): {e} | "
-                        f"gorilla={e.gorilla_error or '<none>'} | taal={e.taal_error or '<none>'}"
+                        f"gorilla={e.gorilla_error or '<none>'} | taal={e.taal_error or '<none>'} | "
+                        f"local_txid={txid or '<none>'}"
                     )
                     logger.error(error)
-                    await self._unlock_reserve_rows(chunk)
+                    if e.submit_mask:
+                        # An endpoint returned 2xx for the POST, so the tx is
+                        # in its pipeline even though validation parked it
+                        # (PENDING_RETRY). Unlocking the inputs here lets the
+                        # next sweep double-spend them against the in-flight
+                        # tx, which is exactly what keeps Arcade answering
+                        # PENDING_RETRY. Insert the pending output instead;
+                        # the reaper promotes it on propagation or quarantines
+                        # it if the tx dies, and a reserve re-sync re-imports
+                        # any still-unspent inputs.
+                        sum_in = sum(u["value_sat"] for u in chunk)
+                        await self._record_pending_consolidation_output(
+                            chunk, txid, output_value, e.submit_mask
+                        )
+                        logger.warning(
+                            "Consolidation tx %s posted but parked "
+                            "(submit_mask=%s): %s inputs / %s sat kept locked "
+                            "as pending output %s sat",
+                            txid,
+                            e.submit_mask,
+                            len(chunk),
+                            sum_in,
+                            output_value,
+                        )
+                        txs_done.append(
+                            {
+                                "txid": txid,
+                                "inputs": len(chunk),
+                                "input_sat": sum_in,
+                                "fee_sat": fee_sat,
+                                "output_sat": output_value,
+                                "broadcaster": "arc",
+                                "status": "PENDING_RETRY",
+                                "submit_mask": e.submit_mask,
+                            }
+                        )
+                    else:
+                        await self._unlock_reserve_rows(chunk)
                     break
                 except Exception as e:
                     error = f"Consolidation broadcast failed: {type(e).__name__}: {e}"
@@ -1332,28 +1404,9 @@ class UTXOManager:
                     submit_mask |= SUBMIT_MASK_TAAL
 
                 sum_in = sum(u["value_sat"] for u in chunk)
-                async with self._pool.acquire() as conn:
-                    async with conn.transaction():
-                        await conn.executemany(
-                            """
-                            DELETE FROM utxos
-                            WHERE txid = $1 AND vout = $2 AND utxo_role = 'reserve'
-                            """,
-                            [(u["txid"], u["vout"]) for u in chunk],
-                        )
-                        # Output enters as pending: the consolidation tx is still
-                        # zero-conf. The reaper promotes it once the tx propagates
-                        # (quorum over submit_mask), or quarantines it if it dies —
-                        # a reserve re-sync re-imports the still-unspent inputs then.
-                        await conn.execute(
-                            """
-                            INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked, pending, submit_mask)
-                            VALUES ($1, 0, $2, 'reserve', FALSE, TRUE, $3)
-                            """,
-                            txid,
-                            output_value,
-                            submit_mask,
-                        )
+                await self._record_pending_consolidation_output(
+                    chunk, txid, output_value, submit_mask
+                )
 
                 logger.info(
                     "Consolidation broadcast via %s (status=%s, submit_mask=%s): "

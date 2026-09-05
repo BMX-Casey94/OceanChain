@@ -112,19 +112,24 @@ def register_mask_updater(updater: Callable[[str], Awaitable[None]]) -> None:
 
 
 async def _taal_background_post(
-    client: httpx.AsyncClient, raw_tx_hex: str
+    client: httpx.AsyncClient, raw_tx_hex: str, taal_tx_hex: Optional[str] = None
 ) -> Optional[dict[str, Any]]:
     """
     POST to TAAL off the hot path. Returns the ARC result on success, None on
     any failure. On success the registered mask updater flips the TAAL bit on
     the tx's pending UTXO rows, tightening the reaper's quorum retroactively.
+
+    ``taal_tx_hex`` overrides the payload (e.g. EF for multi-input
+    consolidations): TAAL's "Missing input scripts" (HTTP 460) comes from it
+    failing to fetch every parent tx for raw payloads, and EF embeds the
+    parent value + locking script so no lookup is needed.
     """
     start = time.monotonic()
     try:
         result = await _post_to_arc(
             client,
             TAAL_ARC_URL,
-            raw_tx_hex,
+            taal_tx_hex or raw_tx_hex,
             "taal",
             api_key=TAAL_API_KEY,
             timeout=_TAAL_BG_POST_TIMEOUT_SECONDS,
@@ -147,7 +152,7 @@ async def _taal_background_post(
 
 
 def _launch_taal_background_post(
-    client: httpx.AsyncClient, raw_tx_hex: str
+    client: httpx.AsyncClient, raw_tx_hex: str, taal_tx_hex: Optional[str] = None
 ) -> Optional[asyncio.Task]:
     """
     Launch the TAAL POST as a tracked background task. Returns None when the
@@ -163,7 +168,7 @@ def _launch_taal_background_post(
     _taal_bg_in_flight += 1
 
     async def _runner() -> Optional[dict[str, Any]]:
-        return await _taal_background_post(client, raw_tx_hex)
+        return await _taal_background_post(client, raw_tx_hex, taal_tx_hex)
 
     task = asyncio.create_task(_runner())
     _background_tasks.add(task)
@@ -631,6 +636,7 @@ async def submit(
     raw_tx_hex: str,
     *,
     gorilla_tx_hex: Optional[str] = None,
+    taal_tx_hex: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Submit a transaction: dual broadcast when configured, else primary + fallback.
@@ -643,21 +649,28 @@ async def submit(
 
     Single mode: GorillaPool Arcade first, one retry on non-terminal failure, then
     TAAL ARC fallback when configured.
-    
+
     Args:
-        raw_tx_hex: Standard raw transaction hex string (always used for TAAL path).
+        raw_tx_hex: Standard raw transaction hex string (default TAAL payload).
         gorilla_tx_hex: Optional Gorilla-specific payload hex (e.g. EF/TEF) sent
             according to GORILLA_TX_FORMAT.
-        
+        taal_tx_hex: Optional TAAL-specific payload hex (e.g. EF for multi-input
+            consolidations, so TAAL needs no parent lookups). Falls back to
+            gorilla_tx_hex, then raw_tx_hex, when unset.
+
     Returns:
         Dict with txid, broadcaster, status, submit_mask (bit0=gorillapool,
         bit1=taal: endpoints confirmed to hold the tx — the reaper's quorum input)
-        
+
     Raises:
         BroadcastError if all attempts fail
     """
     if ARC_DUAL_BROADCAST and TAAL_API_KEY:
-        return await _submit_dual(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
+        return await _submit_dual(
+            raw_tx_hex,
+            gorilla_tx_hex=gorilla_tx_hex,
+            taal_tx_hex=taal_tx_hex if taal_tx_hex is not None else gorilla_tx_hex,
+        )
     return await _submit_sequential(raw_tx_hex, gorilla_tx_hex=gorilla_tx_hex)
 
 
@@ -793,6 +806,7 @@ async def _submit_dual(
     raw_tx_hex: str,
     *,
     gorilla_tx_hex: Optional[str] = None,
+    taal_tx_hex: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Dual broadcast: GorillaPool is the synchronous hot path (POST + poll to
@@ -827,8 +841,12 @@ async def _submit_dual(
             _arc_detail("Skipping GorillaPool submit: %s", gorilla_error)
 
         # Launched before the GorillaPool POST so TAAL's slow validation
-        # overlaps the hot path instead of extending it.
-        taal_task = _launch_taal_background_post(client, raw_tx_hex)
+        # overlaps the hot path instead of extending it. TAAL gets the EF
+        # payload when one was built: without embedded prevouts it must fetch
+        # every parent tx, which fails as HTTP 460 for dust consolidations.
+        taal_task = _launch_taal_background_post(
+            client, raw_tx_hex, taal_tx_hex=taal_tx_hex
+        )
 
         post_start = time.monotonic()
         g_res: Any = None
