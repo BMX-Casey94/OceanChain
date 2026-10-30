@@ -18,3 +18,4 @@ node_modules/
 backend/.venv/
 .venv/
 __pycache__/
+backend/.send_once_done.json
