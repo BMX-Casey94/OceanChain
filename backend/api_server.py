@@ -203,8 +203,17 @@ async def health_check() -> JSONResponse:
     except Exception:
         pass
 
+    # True when there is nothing spendable right now, so vessel broadcasts cannot proceed.
+    # Distinct from `status` (the process is up) so an uptime monitor can alert on a silent
+    # freeze; debounce it (e.g. alert after 3 consecutive minutes) because the pool can
+    # touch zero briefly under burst load while pending change is promoted. Unknown
+    # metrics (-1) are never reported as starved. Pending coins are deliberately not
+    # counted: consolidation pending reserve cannot be broadcast from.
+    pool_starved = pool_metrics["spendable_depth"] == 0
+
     return JSONResponse({
         "status": "ok",
+        "pool_starved": pool_starved,
         "pool_depth": pool_metrics["spendable_depth"],
         "pool_balance_sat": pool_metrics["spendable_balance"],
         "pending_depth": pool_metrics["pending_depth"],
@@ -351,14 +360,40 @@ async def stats_timeseries() -> JSONResponse:
     return JSONResponse(result)
 
 
-@app.post("/engine/pause")
-async def pause_engine() -> JSONResponse:
+def _admin_denied(provided: Optional[str]) -> Optional[JSONResponse]:
     """
-    Pause the broadcasting loop.
+    Shared admin gate for state-changing endpoints. Returns a ready 503/401 response
+    when the request must be refused, or None when the caller presented the valid
+    OCEANCHAIN_ADMIN_API_KEY. Fails closed: with no key configured nothing is allowed.
+    """
+    if not OCEANCHAIN_ADMIN_API_KEY:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Set OCEANCHAIN_ADMIN_API_KEY in .env to enable this endpoint",
+            },
+            status_code=503,
+        )
+    if not _admin_key_authorised(provided):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    return None
+
+
+@app.post("/engine/pause")
+async def pause_engine(
+    x_oceanchain_admin_key: Optional[str] = Header(
+        default=None, alias="X-OceanChain-Admin-Key"
+    ),
+) -> JSONResponse:
+    """
+    Pause the broadcasting loop (admin key required).
     
     Sets the paused flag and clears the pause event, causing
     the broadcasting loop to wait.
     """
+    denied = _admin_denied(x_oceanchain_admin_key)
+    if denied is not None:
+        return denied
     state.paused = True
     state.pause_event.clear()
     logger.info("Broadcasting engine paused")
@@ -366,13 +401,20 @@ async def pause_engine() -> JSONResponse:
 
 
 @app.post("/engine/resume")
-async def resume_engine() -> JSONResponse:
+async def resume_engine(
+    x_oceanchain_admin_key: Optional[str] = Header(
+        default=None, alias="X-OceanChain-Admin-Key"
+    ),
+) -> JSONResponse:
     """
-    Resume the broadcasting loop.
+    Resume the broadcasting loop (admin key required).
     
     Clears the paused flag and sets the pause event, allowing
     the broadcasting loop to continue.
     """
+    denied = _admin_denied(x_oceanchain_admin_key)
+    if denied is not None:
+        return denied
     state.paused = False
     state.pause_event.set()
     logger.info("Broadcasting engine resumed")
@@ -413,14 +455,22 @@ class BulkReserveImportBody(BaseModel):
 
 
 @app.post("/utxo/reserve")
-async def register_reserve_utxo(body: ReserveUtxoBody) -> JSONResponse:
+async def register_reserve_utxo(
+    body: ReserveUtxoBody,
+    x_oceanchain_admin_key: Optional[str] = Header(
+        default=None, alias="X-OceanChain-Admin-Key"
+    ),
+) -> JSONResponse:
     """
-    Record a `reserve` UTXO in Postgres for fan-out funding.
+    Record a `reserve` UTXO in Postgres for fan-out funding (admin key required).
 
     Use the real confirmed txid, vout, and value (satoshis) from your wallet.
     For many rows without indexers, use `POST /utxo/reserves/bulk-import` (admin key).
     Vessel broadcasts only consume `pool` rows after fan-out.
     """
+    denied = _admin_denied(x_oceanchain_admin_key)
+    if denied is not None:
+        return denied
     try:
         txid = body.txid.strip().lower()
         if any(c not in "0123456789abcdef" for c in txid):
@@ -556,7 +606,9 @@ async def bulk_import_reserves(
         return JSONResponse(
             {
                 "status": "ok",
-                "upserted_rows": n,
+                # Insert-only: rows already tracked are left untouched, not refreshed.
+                "inserted_rows": n,
+                "already_tracked": max(0, len(rows) - skipped_min - n),
                 "skipped_below_reserve_min": skipped_min,
                 "reserve_count": metrics["reserve_count"],
                 "reserve_total_sat": metrics["reserve_total_sat"],
@@ -571,12 +623,19 @@ async def bulk_import_reserves(
 
 
 @app.post("/utxo/refill")
-async def trigger_refill() -> JSONResponse:
+async def trigger_refill(
+    x_oceanchain_admin_key: Optional[str] = Header(
+        default=None, alias="X-OceanChain-Admin-Key"
+    ),
+) -> JSONResponse:
     """
-    Manually trigger a UTXO pool fan-out refill.
+    Manually trigger a UTXO pool fan-out refill (admin key required).
 
     Funds the fan-out from internal `reserve` rows only (see POST /utxo/reserve).
     """
+    denied = _admin_denied(x_oceanchain_admin_key)
+    if denied is not None:
+        return denied
     try:
         txid = await utxo_manager.fan_out_refill()
         if txid:

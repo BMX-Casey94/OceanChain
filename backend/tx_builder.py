@@ -30,6 +30,7 @@ from config import (
     ESTIMATED_TX_SIZE,
     MIN_CHANGE_OUTPUT_SAT,
     MIN_TX_FEE_SAT,
+    OMIT_DUST_CHANGE,
     VESSEL_TX_FEE_WORST_CASE_BYTES,
 )
 
@@ -323,7 +324,9 @@ def build_op_return_tx(
         change_address: BSV address for change output
         
     Returns:
-        Tuple of (raw_tx_hex, change_value_sat)
+        Tuple of (raw_tx_hex, change_value_sat). change_value_sat is 0 when the change
+        output was omitted because it would have been below the minimum viable value
+        (the whole input is then paid as fee and there is no output 1 to track).
     """
     # Get private key from config
     private_key = PrivateKey.from_WIF(BSV_PRIVATE_KEY_WIF)
@@ -355,13 +358,26 @@ def build_op_return_tx(
             )
 
         op_return_output = TxOutput(0, op_return_script)
-        change_output = TxOutput(change_value, change_script)
         tx_input = TxInput(prev_txid, prev_vout, Script(), 0xFFFFFFFF)
+
+        # End-of-life coin (OMIT_DUST_CHANGE=1): change below the minimum viable value can
+        # never fund another vessel tx (acquire_utxo ignores it) and costs more to sweep
+        # later than it is worth, so creating it only grows the UTXO set with stranded dust.
+        # Spend the whole input as fee instead (bounded by the minimum viable value, i.e.
+        # tens of satoshis). Off by default: a tx whose only output is the OP_RETURN has not
+        # yet been confirmed accepted by the ARC endpoints in production.
+        omit_change = OMIT_DUST_CHANGE and change_value < minimum_viable_utxo_value()
+        if omit_change:
+            outputs = [op_return_output]
+            effective_fee = input_value
+        else:
+            outputs = [op_return_output, TxOutput(change_value, change_script)]
+            effective_fee = fee
 
         tx = Tx(
             version=1,
             inputs=[tx_input],
-            outputs=[op_return_output, change_output],
+            outputs=outputs,
             locktime=0,
         )
 
@@ -383,8 +399,10 @@ def build_op_return_tx(
 
         actual_bytes = len(tx.to_bytes())
         required_fee = calculate_fee(actual_bytes)
-        if fee >= required_fee:
-            return (tx.to_bytes().hex(), change_value)
+        if effective_fee >= required_fee:
+            # change_value is 0 when the change output was omitted (callers must not
+            # track a change output in that case).
+            return (tx.to_bytes().hex(), 0 if omit_change else change_value)
         fee = required_fee
 
     raise RuntimeError(

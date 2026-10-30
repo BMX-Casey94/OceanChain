@@ -89,6 +89,49 @@ db_pool: Optional[asyncpg.Pool] = None
 # Per-MMSI broadcast policy state (process-local; survives UTXO restarts only if process does).
 _next_due_by_mmsi: dict[str, float] = {}
 _last_pos_by_mmsi: dict[str, tuple[float, float]] = {}
+# (AIS timestamp, lat, lon) of the position most recently written on-chain per MMSI. The
+# AIS snapshot never evicts, so vessels that left coverage keep their last position forever;
+# without this check they would be re-written every interval with identical data, spending
+# fees and queue slots that live vessels need.
+_last_written_by_mmsi: dict[str, tuple[float, float, float]] = {}
+
+
+def _position_ts(position: dict[str, Any]) -> float:
+    """AIS position timestamp as a float, or 0.0 when absent/invalid (treated as unknown)."""
+    try:
+        return float(position.get("timestamp") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _position_key(position: dict[str, Any]) -> tuple[float, float, float]:
+    """(timestamp, lat, lon) identity of a position; NaN-free, 0.0 for unparseable parts."""
+    try:
+        lat = float(position.get("latitude", 0.0))
+        lon = float(position.get("longitude", 0.0))
+    except (TypeError, ValueError):
+        lat, lon = 0.0, 0.0
+    return (_position_ts(position), lat, lon)
+
+
+def _has_new_position(mmsi: str, position: dict[str, Any]) -> bool:
+    """
+    False only when we can prove this exact AIS position is already on-chain.
+
+    "Exact" means the same timestamp AND the same coordinates: the AIS merge can replace
+    coordinates at an equal timestamp, and that newer fix must still be written. An
+    unknown/missing timestamp on either side is treated as new, so a malformed record
+    can never silence a vessel; an older timestamp than the one written is stale.
+    """
+    key = _position_key(position)
+    last = _last_written_by_mmsi.get(mmsi)
+    if key[0] <= 0.0 or last is None or last[0] <= 0.0:
+        return True
+    if key[0] > last[0]:
+        return True
+    if key[0] < last[0]:
+        return False
+    return (key[1], key[2]) != (last[1], last[2])
 
 
 def _is_moving(position: dict[str, Any]) -> bool:
@@ -113,7 +156,10 @@ def _should_attempt(mmsi: str, position: dict[str, Any], now: float) -> bool:
     - Never broadcast: due now
     - Otherwise: due when next_due has passed
     - Optional: immediate if position jumped more than BROADCAST_POSITION_JUMP_NM
+    - Never: when this AIS position (same timestamp) was already written on-chain
     """
+    if not _has_new_position(mmsi, position):
+        return False
     due = _next_due_by_mmsi.get(mmsi, 0.0)
     if due == 0.0:
         # First time seen this process: respect any in-memory last tx (e.g. after restart).
@@ -142,8 +188,19 @@ def _should_attempt(mmsi: str, position: dict[str, Any], now: float) -> bool:
     return False
 
 
-def _mark_attempt(mmsi: str, position: dict[str, Any], now: float, success: bool) -> None:
-    """Update due time and last position after an attempt."""
+def _mark_attempt(
+    mmsi: str,
+    position: dict[str, Any],
+    now: float,
+    success: bool,
+    written_key: Optional[tuple[float, float, float]] = None,
+) -> None:
+    """
+    Update due time and last position after an attempt.
+
+    written_key is the (timestamp, lat, lon) captured *before* the send, so a snapshot
+    entry mutated mid-flight can never be recorded as written when it was not.
+    """
     try:
         lat = float(position.get("latitude", 0.0))
         lon = float(position.get("longitude", 0.0))
@@ -151,6 +208,8 @@ def _mark_attempt(mmsi: str, position: dict[str, Any], now: float, success: bool
     except (TypeError, ValueError):
         pass
     if success:
+        if written_key is not None and written_key[0] > 0.0:
+            _last_written_by_mmsi[mmsi] = written_key
         _next_due_by_mmsi[mmsi] = now + _policy_interval_seconds(position)
     else:
         # Avoid hammering a failing MMSI every tick; retry soon but not instantly.
@@ -255,13 +314,15 @@ async def process_vessel(
             # dropped tx can never orphan a descendant chain. The submit mask records
             # which ARC endpoints hold the tx, setting the reaper's promote quorum.
             await utxo_manager.consume_utxo(utxo["txid"], utxo["vout"])
-            await utxo_manager.add_utxo(
-                txid,
-                1,
-                change_value,
-                pending=True,
-                submit_mask=int(result.get("submit_mask") or 1),
-            )  # Change is output index 1
+            if change_value > 0:
+                await utxo_manager.add_utxo(
+                    txid,
+                    1,
+                    change_value,
+                    pending=True,
+                    submit_mask=int(result.get("submit_mask") or 1),
+                )  # Change is output index 1
+            # change_value == 0: end-of-life coin, no change output was created.
             
             # Update stats
             record_tx(fee_sat)
@@ -301,7 +362,7 @@ async def process_vessel(
                 # it is terminally dead — it is never spendable while unconfirmed.
                 try:
                     txid_canon = canonical_txid_from_raw_hex(raw_tx_hex)
-                    if txid_canon:
+                    if txid_canon and change_value > 0:
                         await utxo_manager.add_utxo(
                             txid_canon,
                             1,
@@ -455,6 +516,7 @@ async def broadcasting_loop() -> None:
             semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
 
             async def run_one(mmsi: str, position: dict[str, Any]) -> bool:
+                key_before_send = _position_key(position)
                 ok = await process_vessel(
                     semaphore,
                     mmsi,
@@ -462,7 +524,7 @@ async def broadcasting_loop() -> None:
                     change_address,
                     gorilla_prevout_locking_script_hex,
                 )
-                _mark_attempt(mmsi, position, now, ok)
+                _mark_attempt(mmsi, position, now, ok, key_before_send)
                 return ok
 
             tasks = [run_one(mmsi, position) for mmsi, position in batch]

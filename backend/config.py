@@ -249,6 +249,18 @@ FEE_RATE_SAT_PER_KB: float = float(os.getenv("FEE_RATE_SAT_PER_KB", "102.5"))
 # Optional floor (satoshis per tx) applied after the sat/kB calculation. Default 1 keeps the
 # effective rate at your configured FEE_RATE only; raising this increases effective sat/kB on small txs.
 MIN_TX_FEE_SAT: int = int(os.getenv("MIN_TX_FEE_SAT", "1"))
+# End-of-life coins: when a pool coin's change would fall below the minimum viable value it
+# can never fund another vessel tx and only strands a dust output (the cause of ~1.2M dust
+# UTXOs on the production wallet). With this on, such a tx omits the change output and pays
+# the remainder (a few tens of satoshis) as fee. The result is a tx whose only output is the
+# OP_RETURN. Default OFF until ARC/Arcade/TAAL acceptance of that shape has been confirmed
+# on mainnet with a single canary tx; then set OMIT_DUST_CHANGE=1.
+OMIT_DUST_CHANGE: bool = os.getenv("OMIT_DUST_CHANGE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # First guess for vessel OP_RETURN fee iteration (tx_builder measures the signed tx and converges).
 ESTIMATED_TX_SIZE: int = int(os.getenv("ESTIMATED_TX_SIZE", "220"))

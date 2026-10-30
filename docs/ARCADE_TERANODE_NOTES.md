@@ -149,6 +149,18 @@ python scripts/list_largest_bitails_unspents.py --address "$OCEANCHAIN_FUNDING_A
 
 ### 3. Import only usable reserve UTXOs
 
+Preferred (fast on very large wallets): `import_reserves_bananablocks.py` reads the address's
+unspent set **sorted by value** and stops at the first output below `--min-sat`, so a wallet
+with over a million dust outputs costs a few dozen requests. Inserts are insert-only: rows the
+app already tracks (any role, locked or pending) are never touched.
+
+```bash
+python scripts/import_reserves_bananablocks.py --address "$OCEANCHAIN_FUNDING_ADDRESS" --dry-run
+python scripts/import_reserves_bananablocks.py --address "$OCEANCHAIN_FUNDING_ADDRESS"
+```
+
+Bitails alternative (pages the whole set at 500/page; very slow beyond ~100k outputs):
+
 ```bash
 cd /opt/oceanchain/backend
 set -a && source .env && set +a
@@ -189,8 +201,9 @@ curl -sS -X POST http://127.0.0.1:8000/utxo/consolidate \
 ### 5. Trigger one refill and verify
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8000/utxo/refill
-curl -sS http://127.0.0.1:8000/health | python -m json.tool
+# /utxo/refill, /utxo/reserve and /engine/* require the admin key (fail closed if unset).
+curl -sS -X POST http://127.0.0.1:8000/utxo/refill -H "X-OceanChain-Admin-Key: $OCEANCHAIN_ADMIN_API_KEY"
+curl -sS http://127.0.0.1:8000/health | python -m json.tool   # watch pool_starved / pool_depth
 journalctl -u oceanchain --since "10 min ago" --no-pager | grep -Ei 'refill|fan-out|Consolidation|ARC response via|ARC status via|GorillaPool attempt|TAAL fallback|Summary'
 ```
 

@@ -231,6 +231,23 @@ class UTXOManager:
                 ALTER TABLE utxos ADD COLUMN IF NOT EXISTS submit_mask SMALLINT NOT NULL DEFAULT 1
             """)
 
+            # Audit trail for quarantined pending rows. Quarantine deletes the live row
+            # (so it can never be spent), but a tx judged dead can still land later; the
+            # archive keeps txid/vout/value so the funds are recoverable and the loss is
+            # visible. Nothing else reads this table on the hot path.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS quarantined_utxos (
+                    txid TEXT NOT NULL,
+                    vout INTEGER NOT NULL,
+                    value_sat BIGINT NOT NULL,
+                    utxo_role TEXT NOT NULL,
+                    submit_mask SMALLINT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (txid, vout)
+                )
+            """)
+
         self._initialized = True
         logger.info("UTXO manager initialized")
 
@@ -543,15 +560,31 @@ class UTXOManager:
         Delete every pending output of a creating tx that is terminally dead or never
         propagated. Safe by construction: pending rows are never spent, so no
         descendant can exist. Returns the number of rows removed.
+
+        Each row is copied to `quarantined_utxos` in the same transaction before it is
+        deleted, so a tx that later confirms can be recovered from the archive (or by
+        re-importing from the chain) instead of the value silently disappearing.
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
 
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM utxos WHERE txid = $1 AND pending = TRUE",
-                txid,
-            )
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO quarantined_utxos
+                        (txid, vout, value_sat, utxo_role, submit_mask, created_at)
+                    SELECT txid, vout, value_sat, utxo_role, submit_mask, created_at
+                    FROM utxos
+                    WHERE txid = $1 AND pending = TRUE
+                    ON CONFLICT (txid, vout) DO NOTHING
+                    """,
+                    txid,
+                )
+                result = await conn.execute(
+                    "DELETE FROM utxos WHERE txid = $1 AND pending = TRUE",
+                    txid,
+                )
         try:
             return int(str(result).split()[-1])
         except (ValueError, IndexError):
@@ -576,17 +609,18 @@ class UTXOManager:
                 """
                 INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
                 VALUES ($1, $2, $3, 'reserve', FALSE)
-                ON CONFLICT (txid, vout) DO UPDATE SET
-                    value_sat = EXCLUDED.value_sat,
-                    utxo_role = 'reserve',
-                    locked = FALSE
+                ON CONFLICT (txid, vout) DO NOTHING
                 """,
                 txid,
                 vout,
                 value_sat,
             )
+        # Insert-only (see bulk_register_reserve_utxos): an existing row is never
+        # unlocked or re-roled, so registering during a consolidation cannot free an
+        # input that is being spent.
         logger.info(
-            "Registered reserve UTXO %s:%s (%s sat) for internal fan-out",
+            "Registered reserve UTXO %s:%s (%s sat) for internal fan-out "
+            "(no-op if already tracked)",
             txid[:16],
             vout,
             value_sat,
@@ -597,12 +631,13 @@ class UTXOManager:
         rows: list[tuple[str, int, int]],
     ) -> tuple[int, int]:
         """
-        Upsert many `reserve` rows in one transaction (for indexer bootstrap).
+        Insert many `reserve` rows in one transaction (for indexer bootstrap).
 
         Each tuple is (txid_hex, vout, value_sat). Invalid txids are skipped.
+        Rows that already exist are left untouched (never unlocked or re-roled).
 
         Returns:
-            (upserted_row_count, skipped_below_reserve_min_count)
+            (newly_inserted_row_count, skipped_below_reserve_min_count)
         """
         if not self._pool:
             raise RuntimeError("UTXO manager not initialized")
@@ -624,30 +659,36 @@ class UTXOManager:
         if not cleaned:
             return 0, skipped_below_min
 
+        # Insert-only: an existing row (any role, locked, or pending) is never touched.
+        # The previous upsert reset `locked` and `utxo_role` on conflict, so re-importing
+        # while a consolidation or fan-out was in flight could unlock its inputs and
+        # double-spend them. Existing rows are authoritative; only genuinely new
+        # outputs are added.
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                await conn.executemany(
+                inserted = await conn.fetch(
                     """
                     INSERT INTO utxos (txid, vout, value_sat, utxo_role, locked)
-                    VALUES ($1, $2, $3, 'reserve', FALSE)
-                    ON CONFLICT (txid, vout) DO UPDATE SET
-                        value_sat = EXCLUDED.value_sat,
-                        utxo_role = 'reserve',
-                        locked = FALSE
+                    SELECT u.t, u.v, u.s, 'reserve', FALSE
+                    FROM unnest($1::text[], $2::int[], $3::bigint[]) AS u(t, v, s)
+                    ON CONFLICT (txid, vout) DO NOTHING
+                    RETURNING txid
                     """,
-                    cleaned,
+                    [c[0] for c in cleaned],
+                    [c[1] for c in cleaned],
+                    [c[2] for c in cleaned],
                 )
 
-        if skipped_below_min:
-            logger.info(
-                "Bulk registered %s reserve UTXO row(s); skipped %s below RESERVE_MIN_IMPORT_SAT=%s",
-                len(cleaned),
-                skipped_below_min,
-                min_sat,
-            )
-        else:
-            logger.info("Bulk registered %s reserve UTXO row(s)", len(cleaned))
-        return len(cleaned), skipped_below_min
+        n_inserted = len(inserted)
+        logger.info(
+            "Bulk registered %s new reserve UTXO row(s); %s already tracked (left untouched); "
+            "%s skipped below RESERVE_MIN_IMPORT_SAT=%s",
+            n_inserted,
+            len(cleaned) - n_inserted,
+            skipped_below_min,
+            min_sat,
+        )
+        return n_inserted, skipped_below_min
 
     async def sync_reserves_from_whatsonchain(
         self,
@@ -741,7 +782,9 @@ class UTXOManager:
             "skipped_unconfirmed": skipped_unconfirmed,
             "reserve_min_import_sat": min_sat,
             "parsed_valid": len(parsed),
-            "upserted_rows": n_reg,
+            # Insert-only: rows already tracked are left untouched, not refreshed.
+            "inserted_rows": n_reg,
+            "already_tracked": max(0, len(parsed) - skipped_bulk_min - n_reg),
             "reserve_count": metrics["reserve_count"],
             "reserve_total_sat": metrics["reserve_total_sat"],
         }
@@ -1504,6 +1547,24 @@ class UTXOManager:
                 # the promotion window right after a fan-out.
                 effective_depth = metrics["spendable_depth"] + metrics["pending_depth"]
                 effective_balance = metrics["spendable_balance"] + metrics["pending_balance"]
+
+                if effective_depth == 0:
+                    # Alert-grade line for journald/log shippers: broadcasting is frozen
+                    # until the pool is refilled, and the refill may be failing silently.
+                    try:
+                        reserve = await self.reserve_funding_metrics()
+                        reserve_note = (
+                            f"reserve_count={reserve['reserve_count']} "
+                            f"reserve_total_sat={reserve['reserve_total_sat']}"
+                        )
+                    except Exception:
+                        reserve_note = "reserve metrics unavailable"
+                    logger.error(
+                        "POOL STARVED: no spendable or pending UTXOs, broadcasting is frozen. "
+                        "%s last_refill_error=%s",
+                        reserve_note,
+                        self._last_refill_error or "<none>",
+                    )
 
                 logger.info(
                     "UTXO pool metrics: spendable_depth=%s unlocked_depth=%s "
