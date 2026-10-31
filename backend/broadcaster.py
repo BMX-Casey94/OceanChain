@@ -964,6 +964,42 @@ def arc_status_rank(status: str) -> Optional[int]:
     return _ARC_STATUS_RANK.get(status)
 
 
+_MINED_RANK = _ARC_STATUS_RANK["MINED"]
+
+
+def is_mined_status(status: Optional[str]) -> bool:
+    """True when the endpoint reports the tx in a block (definitive, no orphan risk)."""
+    rank = _ARC_STATUS_RANK.get(status) if status else None
+    return rank is not None and rank >= _MINED_RANK
+
+
+def endpoint_promotable(
+    status: Optional[str],
+    endpoint: str,
+    gorilla_rank: int,
+    taal_rank: int,
+) -> bool:
+    """
+    Whether one endpoint's status lets a pending coin become spendable.
+
+    GorillaPool must reach ``gorilla_rank`` (PENDING_PROMOTE_STATUS). TAAL only has to
+    reach ``taal_rank``, because its status endpoint stays at ANNOUNCED/REQUESTED for
+    txs it has accepted. SEEN_IN_ORPHAN_MEMPOOL never promotes (the parent is unknown to
+    the network) unless the tx is mined. A mined report from either endpoint is
+    definitive for both.
+    """
+    if not status:
+        return False
+    if is_mined_status(status):
+        return True
+    if status == "SEEN_IN_ORPHAN_MEMPOOL":
+        return False
+    rank = _ARC_STATUS_RANK.get(status)
+    if rank is None:
+        return False
+    return rank >= (taal_rank if endpoint == "taal" else gorilla_rank)
+
+
 def is_final_failure_status(status: str) -> bool:
     """True when ARC will never accept the tx (safe to quarantine its outputs)."""
     return status in _ARC_FINAL_FAILURE_STATUSES

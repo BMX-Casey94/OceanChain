@@ -32,6 +32,7 @@ from config import (
     LOG_SUMMARY_INTERVAL_SECONDS,
     LOG_SAMPLE_RAW_TX_PATH,
     PENDING_PROMOTE_STATUS,
+    PENDING_PROMOTE_TAAL_STATUS,
     PENDING_PROMOTE_QUORUM,
     PENDING_REAPER_INTERVAL_SECONDS,
     PENDING_REAPER_BATCH_SIZE,
@@ -57,7 +58,9 @@ from broadcaster import (
     submit,
     check_tx_status_all,
     arc_status_rank,
+    endpoint_promotable,
     is_final_failure_status,
+    is_mined_status,
     register_mask_updater,
     cancel_background_posts,
     BroadcastError,
@@ -577,6 +580,7 @@ async def pending_reaper_loop() -> None:
     batch slot. The loop only sleeps when idle or when a pass made no progress.
     """
     promote_rank = arc_status_rank(PENDING_PROMOTE_STATUS) or 8  # SEEN_ON_NETWORK
+    taal_promote_rank = arc_status_rank(PENDING_PROMOTE_TAAL_STATUS) or 4  # ANNOUNCED
     # txid -> monotonic deadline; skip until then (head-of-line protection).
     backoff_until: dict[str, float] = {}
 
@@ -611,18 +615,6 @@ async def pending_reaper_loop() -> None:
 
             semaphore = asyncio.Semaphore(PENDING_REAPER_CONCURRENCY)
 
-            def _promotable(status: Optional[str]) -> bool:
-                if not status:
-                    return False
-                rank = arc_status_rank(status)
-                # Orphan-mempool means the network sees the tx but not its parent;
-                # its outputs are not safely spendable until that resolves.
-                return (
-                    rank is not None
-                    and rank >= promote_rank
-                    and status != "SEEN_IN_ORPHAN_MEMPOOL"
-                )
-
             async def check_one(group: dict) -> dict:
                 txid = group["txid"]
                 async with semaphore:
@@ -645,10 +637,21 @@ async def pending_reaper_loop() -> None:
                 required = [e for e in required if e in statuses] or list(statuses)
 
                 req_statuses = [statuses.get(e) for e in required]
-                req_promotable = [_promotable(s) for s in req_statuses]
+                # GorillaPool must reach PENDING_PROMOTE_STATUS; TAAL only needs to
+                # have announced the tx (its status endpoint does not advance).
+                req_promotable = [
+                    endpoint_promotable(statuses.get(e), e, promote_rank, taal_promote_rank)
+                    for e in required
+                ]
                 terminal_seen = any(
                     is_final_failure_status(s) for s in statuses.values() if s
                 )
+
+                # A block already contains the tx: definitive, whatever the other
+                # endpoint's status endpoint still says. Never quarantine these.
+                if any(is_mined_status(s) for s in statuses.values()):
+                    outputs = await utxo_manager.promote_pending_txid(txid)
+                    return {"kind": "promoted", "txid": txid, "outputs": outputs}
 
                 # Terminal failure quarantines unless a required endpoint still
                 # reports the tx healthy (policy rejects are operator-specific;

@@ -171,6 +171,15 @@ PENDING_PROMOTE_STATUS: str = os.getenv("PENDING_PROMOTE_STATUS", "SEEN_ON_NETWO
 # Per-tx the requirement is intersected with the endpoints that actually accepted the
 # submit, so a tx TAAL refused at POST time never stalls on TAAL.
 PENDING_PROMOTE_QUORUM: int = int(os.getenv("PENDING_PROMOTE_QUORUM", "2"))
+# Minimum TAAL status that counts towards the promote quorum. TAAL's GET /tx status does
+# not advance to SEEN_ON_NETWORK for txs it has accepted (it stays at ANNOUNCED_TO_NETWORK
+# or REQUESTED_BY_NETWORK even after the tx is mined), so demanding SEEN_ON_NETWORK from
+# TAAL blocks every coin that TAAL accepted. GorillaPool must still report
+# PENDING_PROMOTE_STATUS; TAAL only has to confirm it announced the tx. A MINED/CONFIRMED
+# report from either endpoint always promotes.
+PENDING_PROMOTE_TAAL_STATUS: str = os.getenv(
+    "PENDING_PROMOTE_TAAL_STATUS", "ANNOUNCED_TO_NETWORK"
+).strip().upper()
 # Reaper cadence and batching for promotion polls (off the broadcast hot path).
 # Batch counts distinct creating txids, so one fan-out's outputs poll as a single tx.
 # Capacity must exceed the tx creation rate. The reaper does not sleep between
@@ -383,6 +392,17 @@ def validate_config() -> list[str]:
         )
     if PENDING_PROMOTE_QUORUM not in (1, 2):
         errors.append("PENDING_PROMOTE_QUORUM must be 1 or 2")
+    allowed_taal_promote = {
+        "ANNOUNCED_TO_NETWORK",
+        "REQUESTED_BY_NETWORK",
+        "SENT_TO_NETWORK",
+        "ACCEPTED_BY_NETWORK",
+    } | allowed_promote
+    if PENDING_PROMOTE_TAAL_STATUS not in allowed_taal_promote:
+        errors.append(
+            "PENDING_PROMOTE_TAAL_STATUS must be one of: "
+            + ", ".join(sorted(allowed_taal_promote))
+        )
     if PENDING_REAPER_INTERVAL_SECONDS < 5:
         errors.append("PENDING_REAPER_INTERVAL_SECONDS must be >= 5")
     if PENDING_REAPER_BATCH_SIZE < 1:
